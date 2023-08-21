@@ -1,0 +1,29 @@
+[package]
+name = "colock4"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+event_zero = {path="../event_zero"}
+lock_api = "0.4.10"
+
+
+[dev-dependencies]
+cfg-if = "1.0.0"
+itertools = "0.11.0"
+rand = "0.8.5"
+criterion = { version = "0.5.1", features = ["html_reports"] }
+
+parking_lot = "0.12.1"
+seqlock = "0.2"
+libc = "0.2"
+usync = "0.2.1"
+
+[[bench]]
+name = "mutex"
+harness = false
+
+[profile.bench]
+lto = true
