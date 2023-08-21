@@ -208,7 +208,7 @@ where
     }
 }
 
-#[repr(align(8))]
+#[repr(align(2))]
 pub struct Node<T> {
     next: Cell<Option<NonNull<Node<T>>>>,
     prev: Cell<Option<NonNull<Node<T>>>>,

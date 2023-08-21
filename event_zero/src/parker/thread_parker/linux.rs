@@ -104,7 +104,7 @@ impl super::ThreadParkerT for ThreadParker {
         // matter since the syscall will just return EFAULT in that case.
         let r = libc::syscall(
             libc::SYS_futex,
-            self.futex,
+            &self.futex,
             libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
             1,
         );
