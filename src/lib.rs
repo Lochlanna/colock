@@ -126,11 +126,11 @@ mod tests {
         do_lots_and_lots(J, K);
     }
 
-    // #[test]
-    // fn lots_and_lots_miri() {
-    //     const J: u64 = 400;
-    //     const K: u64 = 5;
-    //
-    //     do_lots_and_lots(J, K);
-    // }
+    #[test]
+    fn lots_and_lots_miri() {
+        const J: u64 = 400;
+        const K: u64 = 5;
+
+        do_lots_and_lots(J, K);
+    }
 }

@@ -219,9 +219,9 @@ fn criterion_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("colock4", run), &run, |b, run| {
             b.iter_custom(|iters| run_benchmark::<colock4::Mutex<f64>>(run, iters))
         });
-        // group.bench_with_input(BenchmarkId::new("parking_lot", run), &run, |b, run| {
-        //     b.iter_custom(|iters| run_benchmark::<parking_lot::Mutex<f64>>(run, iters))
-        // });
+        group.bench_with_input(BenchmarkId::new("parking_lot", run), &run, |b, run| {
+            b.iter_custom(|iters| run_benchmark::<parking_lot::Mutex<f64>>(run, iters))
+        });
         // group.bench_with_input(BenchmarkId::new("usync", run), &run, |b, run| {
         //     b.iter_custom(|iters| run_benchmark::<usync::Mutex<f64>>(run, iters))
         // });
