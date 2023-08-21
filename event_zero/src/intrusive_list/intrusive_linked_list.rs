@@ -4,8 +4,6 @@ use core::cell::Cell;
 use core::fmt::{Debug, Formatter};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::ops::Deref;
-use std::pin::Pin;
 
 trait LockablePtr: Copy + Sized {
     fn as_non_null<T>(self) -> Option<NonNull<Node<T>>>;
@@ -367,9 +365,7 @@ pub struct ListToken<'a, T> {
 
 impl<T> Drop for ListToken<'_, T> {
     fn drop(&mut self) {
-        unsafe {
-            self.revoke();
-        }
+        self.revoke();
     }
 }
 

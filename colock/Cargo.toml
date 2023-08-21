@@ -24,6 +24,3 @@ usync = "0.2.1"
 [[bench]]
 name = "mutex"
 harness = false
-
-[profile.bench]
-lto = true

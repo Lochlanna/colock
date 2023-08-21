@@ -5,9 +5,12 @@ mod intrusive_list;
 mod maybe_ref;
 mod parker;
 
+use crate::intrusive_list::intrusive_linked_list::Node;
+use crate::parker::State;
 use intrusive_list::intrusive_linked_list::IntrusiveLinkedList;
 use intrusive_list::{IntrusiveList, IntrusiveToken};
 use parker::Parker;
+use std::cell::Cell;
 
 pub trait Listener {
     //TODO pin me!
@@ -41,20 +44,22 @@ where
         Self { inner: L::NEW }
     }
 }
-impl<L> EventApi for EventImpl<L>
-where
-    L: IntrusiveList<Parker>,
-{
+impl EventApi for EventImpl<IntrusiveLinkedList<Parker>> {
     const NEW: Self = Self::new();
-    type Listener<'a> = EventTokenImpl<'a, L> where Self: 'a;
+    type Listener<'a> = EventTokenImpl<'a, IntrusiveLinkedList<Parker>> where Self: 'a;
 
     fn new_listener(&self) -> Self::Listener<'_> {
-        EventTokenImpl {
-            event: self,
-            list_token: self
-                .inner
-                .build_token(Box::new(L::build_node(Parker::new()))),
+        thread_local! {
+            static NODE: Node<Parker> = const {Node::new(Parker::new())}
         }
+        NODE.with(|node| {
+            let node: &'static Node<Parker> = unsafe { core::mem::transmute(node) };
+            EventTokenImpl {
+                event: self,
+                list_token: self.inner.build_token(node),
+                is_on_queue: Cell::new(false),
+            }
+        })
     }
 
     fn notify_one(&self) -> bool {
@@ -74,6 +79,7 @@ where
 {
     event: &'a EventImpl<L>,
     list_token: L::Token<'a>,
+    is_on_queue: Cell<bool>,
 }
 
 impl<L> Drop for EventTokenImpl<'_, L>
@@ -81,10 +87,13 @@ where
     L: IntrusiveList<Parker>,
 {
     fn drop(&mut self) {
+        if !self.is_on_queue.get() {
+            return;
+        }
         if self.list_token.revoke() {
             return;
         }
-        while self.list_token.inner().will_park() {
+        while self.list_token.inner().get_state() != State::Notified {
             // the list token has already been revoked but we haven't been woken up yet!
             core::hint::spin_loop()
         }
@@ -96,11 +105,13 @@ where
     L: IntrusiveList<Parker>,
 {
     fn register(&self) {
+        self.is_on_queue.set(true);
         self.list_token.inner().prepare_park();
         self.list_token.push();
     }
     fn wait(&self) {
         self.list_token.inner().park();
+        self.is_on_queue.set(false);
     }
 }
 

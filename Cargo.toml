@@ -4,3 +4,6 @@ members = [
     "colock",
     "event_zero"
 ]
+
+[profile.bench]
+lto = true
