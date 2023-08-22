@@ -45,6 +45,7 @@ where
     }
 }
 impl EventApi for EventImpl<IntrusiveLinkedList<Parker>> {
+    #[allow(clippy::declare_interior_mutable_const)]
     const NEW: Self = Self::new();
     type Listener<'a> = EventTokenImpl<'a, IntrusiveLinkedList<Parker>> where Self: 'a;
 
