@@ -11,6 +11,7 @@ use intrusive_list::intrusive_linked_list::IntrusiveLinkedList;
 use intrusive_list::{IntrusiveList, IntrusiveToken};
 use parker::Parker;
 use std::cell::Cell;
+use std::sync::atomic::{fence, Ordering};
 
 pub trait Listener {
     //TODO pin me!
@@ -64,6 +65,7 @@ impl EventApi for EventImpl<IntrusiveLinkedList<Parker>> {
     }
 
     fn notify_one(&self) -> bool {
+        fence(Ordering::SeqCst);
         if let Some(unpark_handle) = self.inner.pop(|parker| parker.unpark_handle()) {
             let did_unpark = unpark_handle.un_park();
             return did_unpark;

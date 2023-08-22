@@ -246,7 +246,7 @@ impl<T> Node<T> {
 
     pub fn push(&self, queue: &IntrusiveLinkedList<T>) {
         self.prev.set(None);
-        self.is_on_queue.store(true, Ordering::Release);
+        self.is_on_queue.store(true, Ordering::Relaxed);
         let self_non_null = self.as_non_null();
         let self_non_null_usize = self_non_null.as_usize();
         let mut head = queue.head.load(Ordering::Acquire);
@@ -275,8 +275,7 @@ impl<T> Node<T> {
         }
 
         // the next line unlocks the queue!
-        let old = queue.head.swap(self_non_null_usize, Ordering::Release);
-        debug_assert_eq!(old, self_non_null_usize | LOCKED);
+        queue.head.store(self_non_null_usize, Ordering::Release);
     }
 
     pub fn revoke(&self, queue: &IntrusiveLinkedList<T>) -> bool {
