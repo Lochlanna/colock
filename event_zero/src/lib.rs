@@ -65,7 +65,7 @@ impl EventApi for EventImpl<IntrusiveLinkedList<Parker>> {
     }
 
     fn notify_one(&self) -> bool {
-        full_fence()
+        full_fence();
         if let Some(unpark_handle) = self.inner.pop(|parker| parker.unpark_handle()) {
             let did_unpark = unpark_handle.un_park();
             return did_unpark;
@@ -142,6 +142,7 @@ where
         self.is_on_queue.set(true);
         self.list_token.inner().prepare_park();
         self.list_token.push();
+        full_fence();
     }
     fn wait(&self) {
         self.list_token.inner().park();

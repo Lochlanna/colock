@@ -99,7 +99,7 @@ impl<T> super::IntrusiveList<T> for IntrusiveLinkedList<T> {
     type Node = Node<T>;
 
     fn pop<R>(&self, on_pop: impl Fn(&T) -> R) -> Option<R> {
-        let mut head = self.head.load(Ordering::SeqCst);
+        let mut head = self.head.load(Ordering::Acquire);
         if head.is_null() {
             //it's empty!
             return None;
@@ -255,7 +255,7 @@ impl<T> Node<T> {
             if let Err(new_head) = queue.head.compare_exchange_weak(
                 head & !LOCKED,
                 self_non_null_usize | LOCKED,
-                Ordering::SeqCst,
+                Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
                 head = new_head;
