@@ -60,6 +60,7 @@ impl Drop for LockGuard<'_> {
 
 pub struct IntrusiveLinkedList<T> {
     head: AtomicUsize,
+    length: Cell<usize>,
     tail: Cell<Option<NonNull<Node<T>>>>,
 }
 
@@ -70,6 +71,7 @@ impl<T> IntrusiveLinkedList<T> {
     pub const fn new() -> Self {
         Self {
             head: AtomicUsize::new(0),
+            length: Cell::new(0),
             tail: Cell::new(None),
         }
     }
@@ -98,7 +100,7 @@ impl<T> super::IntrusiveList<T> for IntrusiveLinkedList<T> {
     type Token<'a> = ListToken<'a, T> where Self: 'a;
     type Node = Node<T>;
 
-    fn pop<R>(&self, on_pop: impl Fn(&T) -> R) -> Option<R> {
+    fn pop<R>(&self, on_pop: impl Fn(&T, usize) -> R) -> Option<R> {
         let mut head = self.head.load(Ordering::Acquire);
         if head.is_null() {
             //it's empty!
@@ -130,7 +132,7 @@ impl<T> super::IntrusiveList<T> for IntrusiveLinkedList<T> {
                 .as_ref();
             debug_assert!(tail.is_on_queue.load(Ordering::Relaxed));
             tail.remove(self, false);
-            let r_val = Some(on_pop(&tail.data));
+            let r_val = Some(on_pop(&tail.data, self.length.get()));
             tail.is_on_queue.store(false, Ordering::Relaxed);
             r_val
         }
@@ -245,6 +247,10 @@ impl<T> Node<T> {
     }
 
     pub fn push(&self, queue: &IntrusiveLinkedList<T>) {
+        self.push_with_callback(queue, || ())
+    }
+
+    pub fn push_with_callback<R>(&self, queue: &IntrusiveLinkedList<T>, callback: impl Fn()->R) -> R {
         self.prev.set(None);
         self.is_on_queue.store(true, Ordering::Relaxed);
         let self_non_null = self.as_non_null();
@@ -263,6 +269,8 @@ impl<T> Node<T> {
                 break;
             }
         }
+        queue.length.set(queue.length.get() + 1);
+        let callback_res = callback();
         if head.is_null() {
             queue.tail.set(self_non_null);
         } else {
@@ -276,6 +284,7 @@ impl<T> Node<T> {
 
         // the next line unlocks the queue!
         queue.head.store(self_non_null_usize, Ordering::Release);
+        callback_res
     }
 
     pub fn revoke(&self, queue: &IntrusiveLinkedList<T>) -> bool {
@@ -306,6 +315,7 @@ impl<T> Node<T> {
         true
     }
     fn remove(&self, queue: &IntrusiveLinkedList<T>, allow_unlock: bool) -> bool {
+        queue.length.set(queue.length.get() - 1);
         let mut did_unlock = false;
         if self.prev.get().is_none() {
             // This is the head
@@ -369,8 +379,8 @@ impl<T> Drop for ListToken<'_, T> {
 }
 
 impl<T> IntrusiveToken<T> for ListToken<'_, T> {
-    fn push(&self) {
-        self.node.push(self.queue);
+    fn push_with_callback<R>(&self, callback: impl Fn()->R)->R{
+        self.node.push_with_callback(self.queue, callback)
     }
 
     fn revoke(&self) -> bool {
@@ -521,11 +531,20 @@ mod tests {
         node_c.push();
         assert_eq!(queue.to_vec(), vec![21, 42, 32]);
 
-        assert!(queue.pop(|v| assert_eq!(*v, 32)).is_some());
+        assert!(queue.pop(|v, len| {
+            assert_eq!(*v, 32);
+            assert_eq!(len, 2);
+        }).is_some());
         assert_eq!(queue.to_vec(), vec![21, 42]);
-        assert!(queue.pop(|v| assert_eq!(*v, 42)).is_some());
+        assert!(queue.pop(|v, len| {
+            assert_eq!(*v, 42);
+            assert_eq!(len, 1);
+        }).is_some());
         assert_eq!(queue.to_vec(), vec![21]);
-        assert!(queue.pop(|v| assert_eq!(*v, 21)).is_some());
+        assert!(queue.pop(|v, len| {
+            assert_eq!(*v, 21);
+            assert_eq!(len, 0);
+        }).is_some());
         assert_eq!(queue.to_vec(), vec![]);
     }
 

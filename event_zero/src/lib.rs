@@ -14,8 +14,11 @@ use std::cell::Cell;
 use std::sync::atomic::{fence, Ordering};
 
 pub trait Listener {
+    fn register_with_callback<R>(&self, callback: impl Fn() -> R) -> R;
     //TODO pin me!
-    fn register(&self);
+    fn register(&self) {
+        self.register_with_callback(|| ())
+    }
     //TODO pin me!
     fn wait(&self);
 }
@@ -27,7 +30,10 @@ pub trait EventApi {
         Self: 'a;
     fn new_listener(&self) -> Self::Listener<'_>;
 
-    fn notify_one(&self) -> bool;
+    fn notify_one(&self) -> bool {
+        self.notify_one_with_callback(|_| ()).is_some()
+    }
+    fn notify_one_with_callback<R>(&self, callback: impl Fn(usize) -> R) -> Option<R>;
 }
 
 pub struct EventImpl<L>
@@ -64,13 +70,14 @@ impl EventApi for EventImpl<IntrusiveLinkedList<Parker>> {
         })
     }
 
-    fn notify_one(&self) -> bool {
+    fn notify_one_with_callback<R>(&self, callback: impl Fn(usize) -> R) -> Option<R> {
         full_fence();
-        if let Some(unpark_handle) = self.inner.pop(|parker| parker.unpark_handle()) {
-            let did_unpark = unpark_handle.un_park();
-            return did_unpark;
-        }
-        false
+        self.inner
+            .pop(|parker, num_left| (parker.unpark_handle(), callback(num_left)))
+            .map(|(unpark_handle, callback_result)| {
+                unpark_handle.un_park();
+                callback_result
+            })
     }
 }
 
@@ -138,11 +145,12 @@ impl<L> Listener for EventTokenImpl<'_, L>
 where
     L: IntrusiveList<Parker>,
 {
-    fn register(&self) {
+    fn register_with_callback<R>(&self, callback: impl Fn() -> R) -> R {
         self.is_on_queue.set(true);
         self.list_token.inner().prepare_park();
-        self.list_token.push();
+        let callback_res = self.list_token.push_with_callback(callback);
         full_fence();
+        callback_res
     }
     fn wait(&self) {
         self.list_token.inner().park();
@@ -219,7 +227,7 @@ mod tests {
                 barrier.wait();
             });
             barrier.wait();
-            let handle = event.inner.pop(|p| p.unpark_handle());
+            let handle = event.inner.pop(|p, _| p.unpark_handle());
             barrier.wait();
             thread::sleep(Duration::from_millis(20));
             debug_assert!(handle.expect("couldn't unwrap unpark handle").un_park());
