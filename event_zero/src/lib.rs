@@ -10,7 +10,6 @@ use crate::parker::State;
 use intrusive_list::intrusive_linked_list::IntrusiveLinkedList;
 use intrusive_list::{IntrusiveList, IntrusiveToken};
 use parker::Parker;
-use std::cell::Cell;
 
 pub trait Listener {
     fn register_with_callback(&mut self, callback: impl Fn() -> bool) -> bool;
@@ -32,7 +31,8 @@ pub trait EventApi {
     fn notify_one(&self) -> bool {
         self.notify_one_with_callback(|_| {}, |_| {})
     }
-    fn notify_one_with_callback(&self, on_success: impl Fn(usize), on_fail: impl Fn(usize)) -> bool;
+    fn notify_one_with_callback(&self, on_success: impl Fn(usize), on_fail: impl Fn(usize))
+        -> bool;
 }
 
 pub struct EventImpl<L>
@@ -69,18 +69,24 @@ impl EventApi for EventImpl<IntrusiveLinkedList<Parker>> {
         })
     }
 
-    fn notify_one_with_callback(&self, on_success: impl Fn(usize), on_fail: impl Fn(usize)) -> bool {
-        if let Some(unpark_handle) = self.inner.pop(|parker, num_left| {
+    fn notify_one_with_callback(
+        &self,
+        on_success: impl Fn(usize),
+        on_fail: impl Fn(usize),
+    ) -> bool {
+        if let Some(unpark_handle) = self.inner.pop(
+            |parker, num_left| {
                 on_success(num_left);
                 parker.unpark_handle()
-            }, on_fail) {
+            },
+            on_fail,
+        ) {
             unpark_handle.un_park();
             return true;
         }
         false
     }
 }
-
 
 pub type Event = EventImpl<IntrusiveLinkedList<Parker>>;
 pub type Token<'a> = EventTokenImpl<'a, IntrusiveLinkedList<Parker>>;
@@ -192,7 +198,10 @@ mod tests {
                 barrier.wait();
             });
             barrier.wait();
-            let handle = event.inner.pop(|p, _| p.unpark_handle(), |_| panic!("shouldn't fail to pop"));
+            let handle = event.inner.pop(
+                |p, _| p.unpark_handle(),
+                |_| panic!("shouldn't fail to pop"),
+            );
             barrier.wait();
             thread::sleep(Duration::from_millis(20));
             debug_assert!(handle.expect("pop failed unpark handle was None").un_park());

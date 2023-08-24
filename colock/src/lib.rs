@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 const LOCKED_BIT: u8 = 1;
 const WAIT_BIT: u8 = 2;
 
+#[derive(Debug)]
 pub struct RawMutexImpl<E>
 where
     E: EventApi,

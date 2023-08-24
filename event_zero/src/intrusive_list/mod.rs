@@ -31,7 +31,7 @@ where
     T: Clone,
 {
     fn pop_clone(&self) -> Option<T> {
-        self.pop(|v, _| v.clone(), |_|{})
+        self.pop(|v, _| v.clone(), |_| {})
     }
 }
 
