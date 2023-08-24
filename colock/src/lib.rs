@@ -31,12 +31,12 @@ where
         let mut listener = self.event.new_listener();
         while !self.try_lock() {
             let did_register = listener.register_with_callback(|| {
-                let old_state = self.state.fetch_or(WAIT_BIT | LOCKED_BIT, Ordering::Acquire);
+                let old_state = self.state.swap(WAIT_BIT | LOCKED_BIT, Ordering::Acquire);
                 if old_state & LOCKED_BIT == 0 {
                     // we took the lock abort the register
                     if old_state & WAIT_BIT == 0 {
                         // we were the only waiter
-                        self.state.store(LOCKED_BIT, Ordering::SeqCst);
+                        self.state.store(LOCKED_BIT, Ordering::Relaxed);
                     }
                     false
                 } else {
@@ -44,6 +44,7 @@ where
                 }
             });
             if !did_register {
+                debug_assert!(self.is_locked());
                 // we got the lock and didn't register!
                 return;
             }
@@ -68,26 +69,25 @@ where
     }
 
     unsafe fn unlock(&self) {
-        if self
-            .state
-            .compare_exchange(LOCKED_BIT, 0, Ordering::Release, Ordering::Relaxed)
-            .is_err()
-        {
-            self.event.notify_one_with_callback(
-                |num_waiters_left| {
-                    if num_waiters_left == 0 {
-                        self.state.store(0, Ordering::Release);
-                    } else {
-                        self.state.store(WAIT_BIT, Ordering::Release);
-                    }
-                },
-                |num_left| {
-                    assert_eq!(num_left, 0);
-                    //just unlock if the queue is empty!
-                    self.state.store(0, Ordering::Release);
-                },
-            );
+        let old_state = self.state.fetch_and(!LOCKED_BIT, Ordering::Release);
+        if old_state & WAIT_BIT == 0 {
+            return;
         }
+
+        self.event.notify_one_with_callback(
+            |num_waiters_left| {
+                if num_waiters_left == 0 {
+                    self.state.fetch_and(!WAIT_BIT, Ordering::Relaxed);
+                }
+            },
+            |_| {
+                // panic!("didn't expect to fail...");
+            },
+        );
+    }
+
+    fn is_locked(&self) -> bool {
+        self.state.load(Ordering::Relaxed) & LOCKED_BIT != 0
     }
 }
 
