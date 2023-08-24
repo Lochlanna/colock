@@ -1,13 +1,17 @@
 #![allow(dead_code)]
 
 use event_zero::{Event, EventApi, Listener};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+const LOCKED_BIT: u8 = 1;
+const WAIT_BIT: u8 = 2;
+
 pub struct RawMutexImpl<E>
 where
     E: EventApi,
 {
     event: E,
-    is_locked: AtomicBool,
+    state: AtomicU8,
 }
 
 unsafe impl<E> lock_api::RawMutex for RawMutexImpl<E>
@@ -16,21 +20,28 @@ where
 {
     const INIT: Self = RawMutexImpl {
         event: E::NEW,
-        is_locked: AtomicBool::new(false),
+        state: AtomicU8::new(0),
     };
     type GuardMarker = lock_api::GuardSend;
 
     fn lock(&self) {
-        if self.try_lock() {
-            return;
-        }
         let listener = self.event.new_listener();
-        loop {
-            if self.try_lock() {
-                return;
-            }
-            listener.register();
-            if self.try_lock() {
+        while !self.try_lock() {
+            let did_register = listener.register_with_callback(|| {
+                let old_state = self.state.fetch_or(WAIT_BIT | LOCKED_BIT, Ordering::SeqCst);
+                if old_state & LOCKED_BIT == 0 {
+                    // we took the lock abort the register
+                    if old_state & WAIT_BIT == 0 {
+                        // we were the only waiter
+                        self.state.store(LOCKED_BIT, Ordering::SeqCst);
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            if !did_register {
+                // we got the lock and didn't register!
                 return;
             }
             listener.wait();
@@ -38,14 +49,30 @@ where
     }
 
     fn try_lock(&self) -> bool {
-        self.is_locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
+        self.state.fetch_or(LOCKED_BIT, Ordering::SeqCst) & LOCKED_BIT == 0
     }
 
     unsafe fn unlock(&self) {
-        self.is_locked.store(false, Ordering::Release);
-        self.event.notify_one();
+        if self
+            .state
+            .compare_exchange(LOCKED_BIT, 0, Ordering::SeqCst, Ordering::Relaxed)
+            .is_err()
+        {
+            self.event.notify_one_with_callback(
+                |num_waiters_left| {
+                    if num_waiters_left == 0 {
+                        self.state.store(0, Ordering::SeqCst);
+                    } else {
+                        self.state.store(WAIT_BIT, Ordering::SeqCst);
+                    }
+                },
+                |num_left| {
+                    assert_eq!(num_left, 0);
+                    //just unlock if the queue is empty!
+                    self.state.store(0, Ordering::SeqCst);
+                },
+            );
+        }
     }
 }
 
@@ -103,24 +130,11 @@ mod tests {
         assert_eq!(*m.lock(), j * k);
     }
 
-    /*
-    THE BUG
-
-    t1 - register on queue
-    t1 - check for lock and get lock
-    t2 - pop, revoke and clone
-    t1 - drop and check for revoke (already revoked)
-    t1 - push onto queue
-    t1 - sleep
-    t2 - trigger wake from old reference
-
-    */
-
     #[test]
     #[cfg_attr(miri, ignore)]
     fn lots_and_lots() {
-        // const J: u64 = 10000;
-        const J: u64 = 5000000;
+        const J: u64 = 10000;
+        // const J: u64 = 5000000;
         // const J: u64 = 50000000;
         const K: u64 = 6;
         do_lots_and_lots(J, K);

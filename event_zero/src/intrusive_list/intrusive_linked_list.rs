@@ -2,66 +2,10 @@ use crate::intrusive_list::IntrusiveToken;
 use crate::maybe_ref::MaybeRef;
 use core::cell::Cell;
 use core::fmt::{Debug, Formatter};
-use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-trait LockablePtr: Copy + Sized {
-    fn as_non_null<T>(self) -> Option<NonNull<Node<T>>>;
-    fn is_locked(self) -> bool;
-    fn is_null(self) -> bool {
-        self.as_non_null::<()>().is_none()
-    }
-    fn with_ptr<T>(self, ptr: Option<NonNull<Node<T>>>) -> Self;
-}
-
-const LOCKED: usize = 0x1;
-impl LockablePtr for usize {
-    fn as_non_null<T>(self) -> Option<NonNull<Node<T>>> {
-        let ptr = (self & !LOCKED) as *mut Node<T>;
-        NonNull::new(ptr)
-    }
-
-    fn is_locked(self) -> bool {
-        self & LOCKED == 1
-    }
-
-    fn is_null(self) -> bool {
-        self & !LOCKED == 0
-    }
-
-    fn with_ptr<T>(self, ptr: Option<NonNull<Node<T>>>) -> Self {
-        if let Some(ptr) = ptr {
-            (self & LOCKED) | (ptr.as_ptr() as usize)
-        } else {
-            self & LOCKED
-        }
-    }
-}
-
-trait PtrOps {
-    fn as_usize(&self) -> usize;
-}
-
-impl<T> PtrOps for Option<NonNull<Node<T>>> {
-    fn as_usize(&self) -> usize {
-        0_usize.with_ptr(*self)
-    }
-}
-
-struct LockGuard<'a> {
-    inner: &'a AtomicUsize,
-}
-
-impl Drop for LockGuard<'_> {
-    fn drop(&mut self) {
-        self.inner.fetch_and(!LOCKED, Ordering::Release);
-    }
-}
-
+#[derive(Debug)]
 pub struct IntrusiveLinkedList<T> {
-    head: AtomicUsize,
-    length: Cell<usize>,
-    tail: Cell<Option<NonNull<Node<T>>>>,
+    inner: spin::Mutex<IntrusiveLinkedListInner<T>>,
 }
 
 unsafe impl<T> Sync for IntrusiveLinkedList<T> {}
@@ -70,83 +14,7 @@ unsafe impl<T> Send for IntrusiveLinkedList<T> {}
 impl<T> IntrusiveLinkedList<T> {
     pub const fn new() -> Self {
         Self {
-            head: AtomicUsize::new(0),
-            length: Cell::new(0),
-            tail: Cell::new(None),
-        }
-    }
-
-    fn lock(&self) -> (LockGuard, usize) {
-        let mut head = self.head.load(Ordering::Acquire);
-        loop {
-            while head.is_locked() {
-                core::hint::spin_loop();
-                head = self.head.load(Ordering::Relaxed);
-            }
-            if self
-                .head
-                .compare_exchange(head, head | LOCKED, Ordering::Acquire, Ordering::Acquire)
-                .is_ok()
-            {
-                return (LockGuard { inner: &self.head }, head | LOCKED);
-            }
-        }
-    }
-}
-
-impl<T> super::IntrusiveList<T> for IntrusiveLinkedList<T> {
-    #[allow(clippy::declare_interior_mutable_const)]
-    const NEW: Self = Self::new();
-    type Token<'a> = ListToken<'a, T> where Self: 'a;
-    type Node = Node<T>;
-
-    fn pop<R>(&self, on_pop: impl Fn(&T, usize) -> R) -> Option<R> {
-        let mut head = self.head.load(Ordering::Acquire);
-        if head.is_null() {
-            //it's empty!
-            return None;
-        }
-        while let Err(new_head) = self.head.compare_exchange_weak(
-            head & !LOCKED,
-            head | LOCKED,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        ) {
-            head = new_head;
-            if head.is_null() {
-                //it's empty!
-                return None;
-            }
-        }
-        let _guard = LockGuard { inner: &self.head };
-        if head.is_null() {
-            //it's empty!
-            return None;
-        }
-        debug_assert!(!head.is_null());
-        unsafe {
-            let tail = self
-                .tail
-                .get()
-                .expect("there is no tail but there is a head!")
-                .as_ref();
-            debug_assert!(tail.is_on_queue.load(Ordering::Relaxed));
-            tail.remove(self, false);
-            let r_val = Some(on_pop(&tail.data, self.length.get()));
-            tail.is_on_queue.store(false, Ordering::Relaxed);
-            r_val
-        }
-    }
-
-    fn build_node(data: T) -> Self::Node {
-        Node::new(data)
-    }
-
-    fn build_token<'a>(&'a self, node: impl Into<MaybeRef<'a, Self::Node>>) -> Self::Token<'a> {
-        ListToken {
-            queue: self,
-            node: node.into(),
-            _unpin: core::marker::PhantomPinned,
+            inner: spin::Mutex::new(IntrusiveLinkedListInner::new()),
         }
     }
 }
@@ -156,14 +24,81 @@ where
     T: Clone,
 {
     pub fn to_vec(&self) -> Vec<T> {
+        self.inner.lock().to_vec()
+    }
+}
+
+impl<T> super::IntrusiveList<T> for IntrusiveLinkedList<T> {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const NEW: Self = Self::new();
+    type Token<'a> = ListToken<'a, T> where Self: 'a;
+    type Node = Node<T>;
+
+    fn pop<R>(&self, on_pop: impl Fn(&T, usize) -> R, on_fail: impl Fn(usize)) -> Option<R> {
+        let mut inner = self.inner.lock();
+        inner.pop(on_pop, on_fail)
+    }
+
+    fn build_node(data: T) -> Self::Node {
+        Node::new(data)
+    }
+
+    fn build_token<'a>(&'a self, node: impl Into<MaybeRef<'a, Self::Node>>) -> Self::Token<'a>
+    where
+        T: 'a,
+    {
+        ListToken {
+            queue: self,
+            node: node.into(),
+            _unpin: core::marker::PhantomPinned,
+        }
+    }
+}
+
+struct IntrusiveLinkedListInner<T> {
+    head: *const Node<T>,
+    tail: *const Node<T>,
+    length: usize,
+}
+
+impl<T> IntrusiveLinkedListInner<T> {
+    pub const fn new() -> Self {
+        Self {
+            head: core::ptr::null(),
+            length: 0,
+            tail: core::ptr::null(),
+        }
+    }
+
+    fn pop<R>(&mut self, on_pop: impl Fn(&T, usize) -> R, on_fail: impl Fn(usize)) -> Option<R> {
+        if self.head.is_null() {
+            //it's empty!
+            debug_assert_eq!(self.length, 0);
+            on_fail(0);
+            return None;
+        }
+        unsafe {
+            let tail = &*self.tail;
+            debug_assert!(tail.is_on_queue.get());
+            tail.remove(self);
+            debug_assert!(!tail.is_on_queue.get());
+            Some(on_pop(&tail.data, self.length))
+        }
+    }
+}
+
+impl<T> IntrusiveLinkedListInner<T>
+where
+    T: Clone,
+{
+    pub fn to_vec(&self) -> Vec<T> {
         let mut data = Vec::new();
-        let (_guard, head) = self.lock();
-        if head.is_null() {
+        if self.head.is_null() {
             return data;
         }
-        let mut current = head.as_non_null::<T>();
-        while let Some(current_non_null) = current {
-            let current_ref = unsafe { current_non_null.as_ref() };
+        let mut current = self.head;
+        while !current.is_null() {
+            let current_ref = unsafe { &*current };
             data.push(current_ref.data.clone());
             current = current_ref.next.get()
         }
@@ -171,25 +106,20 @@ where
     }
 }
 
-impl<T> Debug for IntrusiveLinkedList<T>
+impl<T> Debug for IntrusiveLinkedListInner<T>
 where
     T: Debug,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let (_guard, head) = self.lock();
-        if head.is_null() {
+        if self.head.is_null() {
             return f.debug_struct("IntrusiveLinkedList").finish();
         }
         let mut output = String::from("IntrusiveLinkedList [");
-        let mut current = head.as_non_null::<T>();
+        let mut current = self.head;
         let mut next_str = String::from("\n");
-        while let Some(current_non_null) = current {
-            let current_ref = unsafe { current_non_null.as_ref() };
-            if let Some(prev) = current_ref.prev.get() {
-                next_str.push_str(format!("\t↑ {:?}\n", prev.as_ptr()).as_str());
-            } else {
-                next_str.push_str(format!("\t↑ {:?}\n", core::ptr::null::<()>()).as_str());
-            }
+        while !current.is_null() {
+            let current_ref = unsafe { &*current };
+            next_str.push_str(format!("\t↑ {:?}\n", current_ref.prev.get()).as_str());
             output.push_str(
                 format!(
                     "{}{:?} → {:?},",
@@ -197,11 +127,7 @@ where
                 )
                 .as_str(),
             );
-            if let Some(next) = current_ref.next.get() {
-                next_str = format!("\n\t↓ {:?}", next.as_ptr())
-            } else {
-                next_str = format!("\n\t↓ {:?}", core::ptr::null::<()>())
-            }
+            next_str = format!("\n\t↓ {:?}", current_ref.next.get());
             current = current_ref.next.get()
         }
         output += next_str.as_str();
@@ -211,158 +137,96 @@ where
 }
 
 #[repr(align(2))]
+#[derive(Debug)]
 pub struct Node<T> {
-    next: Cell<Option<NonNull<Node<T>>>>,
-    prev: Cell<Option<NonNull<Node<T>>>>,
-    is_on_queue: AtomicBool,
+    next: Cell<*const Node<T>>,
+    prev: Cell<*const Node<T>>,
+    is_on_queue: Cell<bool>,
     data: T,
 }
 
 impl<T> super::Node<T> for Node<T> {}
 
-impl<T> Debug for Node<T>
-where
-    T: Debug,
-{
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Node")
-            .field("data", &self.data)
-            .field("is_on_queue", &self.is_on_queue)
-            .finish()
-    }
-}
-
 impl<T> Node<T> {
     pub const fn new(data: T) -> Self {
         Self {
-            next: Cell::new(None),
-            prev: Cell::new(None),
-            is_on_queue: AtomicBool::new(false),
+            next: Cell::new(core::ptr::null()),
+            prev: Cell::new(core::ptr::null()),
+            is_on_queue: Cell::new(false),
             data,
         }
     }
 
-    fn as_non_null(&self) -> Option<NonNull<Self>> {
-        unsafe { Some(NonNull::new_unchecked(self as *const _ as *mut _)) }
+    fn push(&self, queue: &mut IntrusiveLinkedListInner<T>) {
+        self.push_with_callback(queue, || true);
     }
 
-    pub fn push(&self, queue: &IntrusiveLinkedList<T>) {
-        self.push_with_callback(queue, || ())
-    }
-
-    pub fn push_with_callback<R>(&self, queue: &IntrusiveLinkedList<T>, callback: impl Fn()->R) -> R {
-        self.prev.set(None);
-        self.is_on_queue.store(true, Ordering::Relaxed);
-        let self_non_null = self.as_non_null();
-        let self_non_null_usize = self_non_null.as_usize();
-        let mut head = queue.head.load(Ordering::Acquire);
-        loop {
-            self.next.set(head.as_non_null());
-            if let Err(new_head) = queue.head.compare_exchange_weak(
-                head & !LOCKED,
-                self_non_null_usize | LOCKED,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
-                head = new_head;
-            } else {
-                break;
-            }
+    fn push_with_callback(
+        &self,
+        queue: &mut IntrusiveLinkedListInner<T>,
+        should_push: impl Fn() -> bool,
+    ) -> bool {
+        let should_push = should_push();
+        if !should_push {
+            debug_assert!(!self.is_on_queue.get());
+            return should_push;
         }
-        queue.length.set(queue.length.get() + 1);
-        let callback_res = callback();
-        if head.is_null() {
-            queue.tail.set(self_non_null);
+
+        self.prev.set(core::ptr::null());
+        self.next.set(queue.head);
+        if queue.head.is_null() {
+            queue.tail = self;
         } else {
-            let head_ref = unsafe {
-                head.as_non_null::<T>()
-                    .expect("head was null on push")
-                    .as_ref()
-            };
-            head_ref.prev.set(self_non_null);
+            let head_ref = unsafe { &*queue.head };
+            head_ref.prev.set(self);
         }
+        queue.head = self;
+        self.is_on_queue.set(true);
 
-        // the next line unlocks the queue!
-        queue.head.store(self_non_null_usize, Ordering::Release);
-        callback_res
-    }
+        queue.length += 1;
 
-    pub fn revoke(&self, queue: &IntrusiveLinkedList<T>) -> bool {
-        if !self.is_on_queue.load(Ordering::Acquire) {
-            return false;
-        }
-        let mut head = queue.head.load(Ordering::Acquire);
-        while let Err(new_head) = queue.head.compare_exchange_weak(
-            head & !LOCKED,
-            head | LOCKED,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        ) {
-            core::hint::spin_loop();
-            head = new_head;
-            if head.is_null() {
-                //TODO are there more optimisations here? check is on queue every time?
-                return false;
-            }
-        }
-        if !self.is_on_queue.swap(false, Ordering::Relaxed) {
-            queue.head.fetch_and(!LOCKED, Ordering::Release);
-            return false;
-        }
-        if !self.remove(queue, true) {
-            queue.head.fetch_and(!LOCKED, Ordering::Release);
-        }
         true
     }
-    fn remove(&self, queue: &IntrusiveLinkedList<T>, allow_unlock: bool) -> bool {
-        queue.length.set(queue.length.get() - 1);
-        let mut did_unlock = false;
-        if self.prev.get().is_none() {
+
+    fn revoke(&self, queue: &mut IntrusiveLinkedListInner<T>) -> bool {
+        if !self.is_on_queue.replace(false) {
+            return false;
+        }
+        self.remove(queue);
+        true
+    }
+    fn remove(&self, queue: &mut IntrusiveLinkedListInner<T>) {
+        queue.length -= 1;
+
+        if self.prev.get().is_null() {
             // This is the head
             let next = self.next.get();
-            if let Some(next) = next {
-                let next_ref = unsafe { next.as_ref() };
-                next_ref.prev.set(None);
+            if let Some(next) = unsafe { next.as_ref() } {
+                next.prev.set(core::ptr::null());
             } else {
                 // and the tail!
-                debug_assert!(queue
-                    .tail
-                    .get()
-                    .is_some_and(|nn| nn.as_ptr() == self as *const _ as *mut _));
-                queue.tail.set(None);
+                debug_assert_eq!(queue.tail, self as *const _);
+                queue.tail = core::ptr::null();
             }
-            let next = next.as_usize();
-            if allow_unlock {
-                // this unlocks the queue!
-                debug_assert!(!next.is_locked());
-                queue.head.store(next, Ordering::Release);
-                did_unlock = true;
-            } else {
-                queue.head.store(next | LOCKED, Ordering::Relaxed);
-            }
-        } else if self.next.get().is_none() {
+            queue.head = next;
+        } else if self.next.get().is_null() {
             // this is the tail!
-            debug_assert!(queue
-                .tail
-                .get()
-                .is_some_and(|nn| nn.as_ptr() == self as *const _ as *mut _));
-            let new_tail = self.prev.get();
-            if let Some(new_tail) = new_tail {
-                unsafe { new_tail.as_ref().next.set(None) }
-            }
-            queue.tail.set(new_tail);
+            debug_assert_eq!(queue.tail, self as *const _);
+            let prev = unsafe { &*self.prev.get() };
+            prev.next.set(core::ptr::null());
+            queue.tail = prev;
         } else {
-            let prev = self.prev.get();
-            let prev_ref = unsafe { prev.expect("prev was nul!").as_ref() };
-            let next = self.next.get();
-            let next_ref = unsafe { next.expect("next was nul!").as_ref() };
-
-            next_ref.prev.set(prev);
-            prev_ref.next.set(next);
+            // we are in the middle somewhere
+            let prev = unsafe { &*self.prev.get() };
+            let next = unsafe { &*self.next.get() };
+            next.prev.set(prev);
+            prev.next.set(next);
         }
-        self.next.set(None);
-        self.prev.set(None);
-        did_unlock
+
+        self.next.set(core::ptr::null());
+        self.prev.set(core::ptr::null());
+
+        self.is_on_queue.set(false)
     }
 }
 
@@ -379,20 +243,18 @@ impl<T> Drop for ListToken<'_, T> {
 }
 
 impl<T> IntrusiveToken<T> for ListToken<'_, T> {
-    fn push_with_callback<R>(&self, callback: impl Fn()->R)->R{
-        self.node.push_with_callback(self.queue, callback)
+    fn push_with_callback(&self, callback: impl Fn() -> bool) -> bool {
+        let mut queue = self.queue.inner.lock();
+        self.node.push_with_callback(&mut queue, callback)
     }
 
     fn revoke(&self) -> bool {
-        self.node.revoke(self.queue)
+        let mut queue = self.queue.inner.lock();
+        self.node.revoke(&mut queue)
     }
 
     fn inner(&self) -> &T {
         &self.node.data
-    }
-
-    fn is_on_queue(&self) -> bool {
-        self.node.is_on_queue.load(Ordering::Acquire)
     }
 }
 
@@ -404,13 +266,26 @@ mod tests {
     use std::collections::HashMap;
     use std::thread;
 
+    trait PtrHelpers {
+        fn not_null(&self) -> bool;
+    }
+
+    impl<T> PtrHelpers for *const T {
+        fn not_null(&self) -> bool {
+            !self.is_null()
+        }
+    }
+
     #[test]
     fn it_works() {
         let ill = IntrusiveLinkedList::new();
         let node_a = Node::new(42);
         let node_b = Node::new(32);
-        node_a.push(&ill);
-        node_b.push(&ill);
+        {
+            let mut ill_lock = ill.inner.lock();
+            node_a.push(&mut ill_lock);
+            node_b.push(&mut ill_lock);
+        }
         debug_assert_eq!(ill.pop_clone(), Some(42));
         debug_assert_eq!(ill.pop_clone(), Some(32));
     }
@@ -444,14 +319,14 @@ mod tests {
         let elements = queue.to_vec();
         assert_eq!(elements, vec![42, 32]);
 
-        assert!(node_a.node.prev.get().is_some());
-        assert!(node_a.node.next.get().is_none());
+        assert!(node_a.node.prev.get().not_null());
+        assert!(node_a.node.next.get().is_null());
 
-        assert!(node_b.node.prev.get().is_none());
-        assert!(node_b.node.next.get().is_some());
+        assert!(node_b.node.prev.get().is_null());
+        assert!(node_b.node.next.get().not_null());
 
-        assert!(node_c.node.next.get().is_none());
-        assert!(node_c.node.prev.get().is_none());
+        assert!(node_c.node.next.get().is_null());
+        assert!(node_c.node.prev.get().is_null());
     }
 
     #[test]
@@ -469,14 +344,14 @@ mod tests {
         let elements = queue.to_vec();
         assert_eq!(elements, vec![21, 42]);
 
-        assert!(node_a.node.prev.get().is_none());
-        assert!(node_a.node.next.get().is_none());
+        assert!(node_a.node.prev.get().is_null());
+        assert!(node_a.node.next.get().is_null());
 
-        assert!(node_b.node.prev.get().is_some());
-        assert!(node_b.node.next.get().is_none());
+        assert!(node_b.node.prev.get().not_null());
+        assert!(node_b.node.next.get().is_null());
 
-        assert!(node_c.node.next.get().is_some());
-        assert!(node_c.node.prev.get().is_none());
+        assert!(node_c.node.next.get().not_null());
+        assert!(node_c.node.prev.get().is_null());
     }
 
     #[test]
@@ -495,14 +370,14 @@ mod tests {
         let elements = queue.to_vec();
         assert_eq!(elements, vec![21, 32]);
 
-        assert!(node_a.node.prev.get().is_some());
-        assert!(node_a.node.next.get().is_none());
+        assert!(node_a.node.prev.get().not_null());
+        assert!(node_a.node.next.get().is_null());
 
-        assert!(node_b.node.prev.get().is_none());
-        assert!(node_b.node.next.get().is_none());
+        assert!(node_b.node.prev.get().is_null());
+        assert!(node_b.node.next.get().is_null());
 
-        assert!(node_c.node.next.get().is_some());
-        assert!(node_c.node.prev.get().is_none());
+        assert!(node_c.node.next.get().not_null());
+        assert!(node_c.node.prev.get().is_null());
     }
 
     #[test]
@@ -531,21 +406,39 @@ mod tests {
         node_c.push();
         assert_eq!(queue.to_vec(), vec![21, 42, 32]);
 
-        assert!(queue.pop(|v, len| {
-            assert_eq!(*v, 32);
-            assert_eq!(len, 2);
-        }).is_some());
+        queue.pop(
+            |v, len| {
+                assert_eq!(*v, 32);
+                assert_eq!(len, 2);
+            },
+            |_| panic!("shouldn't fail"),
+        );
         assert_eq!(queue.to_vec(), vec![21, 42]);
-        assert!(queue.pop(|v, len| {
-            assert_eq!(*v, 42);
-            assert_eq!(len, 1);
-        }).is_some());
+        queue.pop(
+            |v, len| {
+                assert_eq!(*v, 42);
+                assert_eq!(len, 1);
+            },
+            |_| panic!("shouldn't fail"),
+        );
         assert_eq!(queue.to_vec(), vec![21]);
-        assert!(queue.pop(|v, len| {
-            assert_eq!(*v, 21);
-            assert_eq!(len, 0);
-        }).is_some());
+        queue.pop(
+            |v, len| {
+                assert_eq!(*v, 21);
+                assert_eq!(len, 0);
+            },
+            |_| panic!("shouldn't fail"),
+        );
         assert_eq!(queue.to_vec(), vec![]);
+        let did_fail = Cell::new(false);
+        queue.pop(
+            |_v, _len| panic!("shouldn't pop"),
+            |num_left| {
+                assert_eq!(num_left, 0);
+                did_fail.set(true);
+            },
+        );
+        assert!(did_fail.get());
     }
 
     fn do_pipe_test(num_elements: usize, num_senders: usize, num_receivers: usize) {

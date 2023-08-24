@@ -14,10 +14,10 @@ use std::cell::Cell;
 use std::sync::atomic::{fence, Ordering};
 
 pub trait Listener {
-    fn register_with_callback<R>(&self, callback: impl Fn() -> R) -> R;
+    fn register_with_callback(&self, callback: impl Fn() -> bool) -> bool;
     //TODO pin me!
     fn register(&self) {
-        self.register_with_callback(|| ())
+        self.register_with_callback(|| true);
     }
     //TODO pin me!
     fn wait(&self);
@@ -31,9 +31,9 @@ pub trait EventApi {
     fn new_listener(&self) -> Self::Listener<'_>;
 
     fn notify_one(&self) -> bool {
-        self.notify_one_with_callback(|_| ()).is_some()
+        self.notify_one_with_callback(|_| {}, |_| {})
     }
-    fn notify_one_with_callback<R>(&self, callback: impl Fn(usize) -> R) -> Option<R>;
+    fn notify_one_with_callback(&self, on_success: impl Fn(usize), on_fail: impl Fn(usize)) -> bool;
 }
 
 pub struct EventImpl<L>
@@ -70,14 +70,15 @@ impl EventApi for EventImpl<IntrusiveLinkedList<Parker>> {
         })
     }
 
-    fn notify_one_with_callback<R>(&self, callback: impl Fn(usize) -> R) -> Option<R> {
-        full_fence();
-        self.inner
-            .pop(|parker, num_left| (parker.unpark_handle(), callback(num_left)))
-            .map(|(unpark_handle, callback_result)| {
-                unpark_handle.un_park();
-                callback_result
-            })
+    fn notify_one_with_callback(&self, on_success: impl Fn(usize), on_fail: impl Fn(usize)) -> bool {
+        if let Some(unpark_handle) = self.inner.pop(|parker, num_left| {
+                on_success(num_left);
+                parker.unpark_handle()
+            }, on_fail) {
+            unpark_handle.un_park();
+            return true;
+        }
+        false
     }
 }
 
@@ -145,12 +146,14 @@ impl<L> Listener for EventTokenImpl<'_, L>
 where
     L: IntrusiveList<Parker>,
 {
-    fn register_with_callback<R>(&self, callback: impl Fn() -> R) -> R {
-        self.is_on_queue.set(true);
+    fn register_with_callback(&self, should_register: impl Fn() -> bool) -> bool {
+        self.is_on_queue.set(false);
         self.list_token.inner().prepare_park();
-        let callback_res = self.list_token.push_with_callback(callback);
-        full_fence();
-        callback_res
+        let did_push = self.list_token.push_with_callback(should_register);
+        if did_push {
+            self.is_on_queue.set(true);
+        }
+        did_push
     }
     fn wait(&self) {
         self.list_token.inner().park();
@@ -207,13 +210,6 @@ mod tests {
     }
 
     #[test]
-    fn hypothesis() {
-        let thread = thread::current();
-        thread.unpark();
-        thread::park();
-    }
-
-    #[test]
     fn test_drop_spin() {
         let event = Event::new();
         let barrier = std::sync::Barrier::new(2);
@@ -227,10 +223,10 @@ mod tests {
                 barrier.wait();
             });
             barrier.wait();
-            let handle = event.inner.pop(|p, _| p.unpark_handle());
+            let handle = event.inner.pop(|p, _| p.unpark_handle(), |_| panic!("shouldn't fail to pop"));
             barrier.wait();
             thread::sleep(Duration::from_millis(20));
-            debug_assert!(handle.expect("couldn't unwrap unpark handle").un_park());
+            debug_assert!(handle.expect("pop failed unpark handle was None").un_park());
             barrier.wait();
         });
     }
