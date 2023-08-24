@@ -54,7 +54,8 @@ where
         }
 
         let mut listener = self.event.new_listener();
-        loop {
+
+        while !self.try_lock() {
             let did_register = listener.register_with_callback(|| {
                 let old_state = self.state.swap(WAIT_BIT | LOCKED_BIT, Ordering::Acquire);
                 if old_state & LOCKED_BIT == 0 {
@@ -74,9 +75,6 @@ where
                 return;
             }
             listener.wait();
-            if self.try_lock() {
-                return;
-            }
         }
     }
 
