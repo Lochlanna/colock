@@ -49,7 +49,7 @@ where
     type GuardMarker = lock_api::GuardSend;
 
     fn lock(&self) {
-        if self.spin_for_lock() {
+        if self.try_lock() {
             return;
         }
 
