@@ -25,10 +25,13 @@ where
     type GuardMarker = lock_api::GuardSend;
 
     fn lock(&self) {
-        let listener = self.event.new_listener();
+        if self.try_lock() {
+            return;
+        }
+        let mut listener = self.event.new_listener();
         while !self.try_lock() {
             let did_register = listener.register_with_callback(|| {
-                let old_state = self.state.fetch_or(WAIT_BIT | LOCKED_BIT, Ordering::SeqCst);
+                let old_state = self.state.fetch_or(WAIT_BIT | LOCKED_BIT, Ordering::Acquire);
                 if old_state & LOCKED_BIT == 0 {
                     // we took the lock abort the register
                     if old_state & WAIT_BIT == 0 {
@@ -49,27 +52,39 @@ where
     }
 
     fn try_lock(&self) -> bool {
-        self.state.fetch_or(LOCKED_BIT, Ordering::SeqCst) & LOCKED_BIT == 0
+        let mut state = self.state.load(Ordering::Relaxed);
+        while state & LOCKED_BIT == 0 {
+            match self.state.compare_exchange_weak(
+                state,
+                state | LOCKED_BIT,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(s) => state = s,
+            }
+        }
+        false
     }
 
     unsafe fn unlock(&self) {
         if self
             .state
-            .compare_exchange(LOCKED_BIT, 0, Ordering::SeqCst, Ordering::Relaxed)
+            .compare_exchange(LOCKED_BIT, 0, Ordering::Release, Ordering::Relaxed)
             .is_err()
         {
             self.event.notify_one_with_callback(
                 |num_waiters_left| {
                     if num_waiters_left == 0 {
-                        self.state.store(0, Ordering::SeqCst);
+                        self.state.store(0, Ordering::Release);
                     } else {
-                        self.state.store(WAIT_BIT, Ordering::SeqCst);
+                        self.state.store(WAIT_BIT, Ordering::Release);
                     }
                 },
                 |num_left| {
                     assert_eq!(num_left, 0);
                     //just unlock if the queue is empty!
-                    self.state.store(0, Ordering::SeqCst);
+                    self.state.store(0, Ordering::Release);
                 },
             );
         }

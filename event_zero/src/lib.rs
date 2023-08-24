@@ -11,16 +11,15 @@ use intrusive_list::intrusive_linked_list::IntrusiveLinkedList;
 use intrusive_list::{IntrusiveList, IntrusiveToken};
 use parker::Parker;
 use std::cell::Cell;
-use std::sync::atomic::{fence, Ordering};
 
 pub trait Listener {
-    fn register_with_callback(&self, callback: impl Fn() -> bool) -> bool;
+    fn register_with_callback(&mut self, callback: impl Fn() -> bool) -> bool;
     //TODO pin me!
-    fn register(&self) {
+    fn register(&mut self) {
         self.register_with_callback(|| true);
     }
     //TODO pin me!
-    fn wait(&self);
+    fn wait(&mut self);
 }
 pub trait EventApi {
     #[allow(clippy::declare_interior_mutable_const)]
@@ -65,7 +64,7 @@ impl EventApi for EventImpl<IntrusiveLinkedList<Parker>> {
             EventTokenImpl {
                 event: self,
                 list_token: self.inner.build_token(node),
-                is_on_queue: Cell::new(false),
+                is_on_queue: false,
             }
         })
     }
@@ -82,36 +81,6 @@ impl EventApi for EventImpl<IntrusiveLinkedList<Parker>> {
     }
 }
 
-#[inline]
-fn full_fence() {
-    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), not(miri), not(loom)))]
-    {
-        use core::{arch::asm, cell::UnsafeCell};
-        // HACK(stjepang): On x86 architectures there are two different ways of executing
-        // a `SeqCst` fence.
-        //
-        // 1. `atomic::fence(SeqCst)`, which compiles into a `mfence` instruction.
-        // 2. A `lock <op>` instruction.
-        //
-        // Both instructions have the effect of a full barrier, but empirical benchmarks have shown
-        // that the second one is sometimes a bit faster.
-        let a = UnsafeCell::new(0_usize);
-        // It is common to use `lock or` here, but when using a local variable, `lock not`, which
-        // does not change the flag, should be slightly more efficient.
-        // Refs: https://www.felixcloutier.com/x86/not
-        unsafe {
-            #[cfg(target_pointer_width = "64")]
-            asm!("lock not qword ptr [{0}]", in(reg) a.get(), options(nostack, preserves_flags));
-            #[cfg(target_pointer_width = "32")]
-            asm!("lock not dword ptr [{0:e}]", in(reg) a.get(), options(nostack, preserves_flags));
-        }
-        return;
-    }
-    #[allow(unreachable_code)]
-    {
-        fence(Ordering::SeqCst);
-    }
-}
 
 pub type Event = EventImpl<IntrusiveLinkedList<Parker>>;
 pub type Token<'a> = EventTokenImpl<'a, IntrusiveLinkedList<Parker>>;
@@ -121,7 +90,7 @@ where
 {
     event: &'a EventImpl<L>,
     list_token: L::Token<'a>,
-    is_on_queue: Cell<bool>,
+    is_on_queue: bool,
 }
 
 impl<L> Drop for EventTokenImpl<'_, L>
@@ -129,7 +98,7 @@ where
     L: IntrusiveList<Parker>,
 {
     fn drop(&mut self) {
-        if !self.is_on_queue.get() {
+        if !self.is_on_queue {
             return;
         }
         if self.list_token.revoke() {
@@ -146,18 +115,18 @@ impl<L> Listener for EventTokenImpl<'_, L>
 where
     L: IntrusiveList<Parker>,
 {
-    fn register_with_callback(&self, should_register: impl Fn() -> bool) -> bool {
-        self.is_on_queue.set(false);
+    fn register_with_callback(&mut self, should_register: impl Fn() -> bool) -> bool {
+        debug_assert!(!self.is_on_queue);
         self.list_token.inner().prepare_park();
         let did_push = self.list_token.push_with_callback(should_register);
         if did_push {
-            self.is_on_queue.set(true);
+            self.is_on_queue = true;
         }
         did_push
     }
-    fn wait(&self) {
+    fn wait(&mut self) {
         self.list_token.inner().park();
-        self.is_on_queue.set(false);
+        self.is_on_queue = false;
     }
 }
 
@@ -180,7 +149,7 @@ mod tests {
                 debug_assert!(event.notify_one());
                 barrier.wait();
             });
-            let listen_guard = event.new_listener();
+            let mut listen_guard = event.new_listener();
             listen_guard.register();
             barrier.wait();
             assert!(!test_val.load(Ordering::SeqCst));
@@ -196,7 +165,7 @@ mod tests {
         let barrier = std::sync::Barrier::new(2);
         thread::scope(|s| {
             s.spawn(|| {
-                let listen_guard = event.new_listener();
+                let mut listen_guard = event.new_listener();
                 listen_guard.register();
                 barrier.wait();
                 drop(listen_guard);
@@ -215,7 +184,7 @@ mod tests {
         let barrier = std::sync::Barrier::new(2);
         thread::scope(|s| {
             s.spawn(|| {
-                let listen_guard = event.new_listener();
+                let mut listen_guard = event.new_listener();
                 listen_guard.register();
                 barrier.wait();
                 barrier.wait();
