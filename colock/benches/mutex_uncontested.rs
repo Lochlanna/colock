@@ -7,7 +7,6 @@ use shared::*;
 use core::fmt;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use itertools::Itertools;
-use std::cell::UnsafeCell;
 use std::fmt::Display;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -77,8 +76,8 @@ fn run_benchmark<M: Mutex<f64> + Send + Sync>(run: &Run, num_iters: u64) -> Dura
     elapsed
 }
 
-const MIN_THREADS: usize = 1;
-const MAX_THREADS: usize = 2;
+const MIN_THREADS: usize = 2;
+const MAX_THREADS: usize = 3;
 
 const MIN_INSIDE: usize = 1;
 const MAX_INSIDE: usize = 2;
@@ -89,35 +88,23 @@ const MAX_OUTSIDE: usize = 2;
 const OUTSIDE_STEP: usize = 2;
 
 fn criterion_benchmark(c: &mut Criterion) {
-    let mut group = c.benchmark_group("throughput");
-    let runs = (MIN_THREADS..=MAX_THREADS)
-        .cartesian_product((MIN_INSIDE..=MAX_INSIDE).step_by(INSIDE_STEP))
-        .cartesian_product((MIN_OUTSIDE..=MAX_OUTSIDE).step_by(OUTSIDE_STEP))
-        .map(|((a, b), c)| Run::from((a, b, c)));
-    for run in runs {
-        group.bench_with_input(BenchmarkId::new("colock4", run), &run, |b, run| {
-            b.iter_custom(|iters| run_benchmark::<colock::Mutex<f64>>(run, iters))
+    let mut group = c.benchmark_group("mutex uncontested");
+
+    group.bench_function("colcok", |b| {
+        let padded_lock = ([0u8; 300], colock::Mutex::new(0.0), [0u8; 300]);
+        let lock_ref = &padded_lock.1;
+        b.iter(|| {
+            core::mem::drop(black_box(lock_ref.lock()));
         });
-        group.bench_with_input(BenchmarkId::new("parking_lot", run), &run, |b, run| {
-            b.iter_custom(|iters| run_benchmark::<parking_lot::Mutex<f64>>(run, iters))
+    });
+
+    group.bench_function("parking_lot", |b| {
+        let padded_lock = ([0u8; 300], parking_lot::Mutex::new(0.0), [0u8; 300]);
+        let lock_ref = &padded_lock.1;
+        b.iter(|| {
+            core::mem::drop(black_box(lock_ref.lock()));
         });
-        // group.bench_with_input(BenchmarkId::new("usync", run), &run, |b, run| {
-        //     b.iter_custom(|iters| run_benchmark::<usync::Mutex<f64>>(run, iters))
-        // });
-        // group.bench_with_input(BenchmarkId::new("std", run), &run, |b, run| {
-        //     b.iter_custom(|iters| run_benchmark::<std::sync::Mutex<f64>>(run, iters))
-        // });
-        // if cfg!(unix) {
-        //     group.bench_with_input(BenchmarkId::new("pthread", run), &run, |b, run| {
-        //         b.iter_custom(|iters| run_benchmark::<PthreadMutex<f64>>(run, iters))
-        //     });
-        // }
-        // if cfg!(windows) {
-        //     group.bench_with_input(BenchmarkId::new("SrwLock", run), &run, |b, run| {
-        //         b.iter_custom(|iters| run_benchmark::<SrwLock<f64>>(run, iters))
-        //     });
-        // }
-    }
+    });
 }
 
 criterion_group!(benches, criterion_benchmark);

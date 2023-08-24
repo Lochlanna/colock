@@ -24,3 +24,13 @@ usync = "0.2.1"
 [[bench]]
 name = "mutex"
 harness = false
+
+
+[[bench]]
+name = "mutex_uncontested"
+harness = false
+
+
+[[bench]]
+name = "mutex_sleep"
+harness = false

@@ -19,7 +19,7 @@ pub trait IntrusiveList<T> {
         Self: 'a,
         T: 'a;
     type Node: Node<T>;
-    fn pop<R>(&self, on_pop: impl Fn(&T, usize) -> R, on_fail: impl Fn(usize)) -> Option<R>;
+    fn pop<R>(&self, on_pop: impl Fn(&T, usize) -> Option<R>, on_fail: impl Fn(usize)) -> Option<R>;
 
     fn build_node(data: T) -> Self::Node;
     fn build_token<'a>(&'a self, node: impl Into<MaybeRef<'a, Self::Node>>) -> Self::Token<'a>
@@ -31,7 +31,7 @@ where
     T: Clone,
 {
     fn pop_clone(&self) -> Option<T> {
-        self.pop(|v, _| v.clone(), |_| {})
+        self.pop(|v, _| Some(v.clone()), |_| {})
     }
 }
 

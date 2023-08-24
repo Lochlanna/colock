@@ -83,16 +83,25 @@ where
     }
 
     unsafe fn unlock(&self) {
-        let old_state = self.state.fetch_and(!LOCKED_BIT, Ordering::Release);
-        if old_state & WAIT_BIT == 0 {
+        let mut state = self.state.load(Ordering::Relaxed);
+        while let Err(new_state) = self.state.compare_exchange_weak(
+            state,
+            state & !LOCKED_BIT,
+            Ordering::Release,
+            Ordering::Acquire,
+        ) {
+            state = new_state;
+        }
+        if state & WAIT_BIT == 0 {
             return;
         }
 
         self.event.notify_one_with_callback(
             |num_waiters_left| {
-                if num_waiters_left == 0 {
+                if num_waiters_left == 1 {
                     self.state.fetch_and(!WAIT_BIT, Ordering::Relaxed);
                 }
+                true
             },
             |_| {
                 // panic!("didn't expect to fail...");

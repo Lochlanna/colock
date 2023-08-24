@@ -34,7 +34,7 @@ impl<T> super::IntrusiveList<T> for IntrusiveLinkedList<T> {
     type Token<'a> = ListToken<'a, T> where Self: 'a;
     type Node = Node<T>;
 
-    fn pop<R>(&self, on_pop: impl Fn(&T, usize) -> R, on_fail: impl Fn(usize)) -> Option<R> {
+    fn pop<R>(&self, on_pop: impl Fn(&T, usize) -> Option<R>, on_fail: impl Fn(usize)) -> Option<R> {
         let mut inner = self.inner.lock();
         inner.pop(on_pop, on_fail)
     }
@@ -70,7 +70,11 @@ impl<T> IntrusiveLinkedListInner<T> {
         }
     }
 
-    fn pop<R>(&mut self, on_pop: impl Fn(&T, usize) -> R, on_fail: impl Fn(usize)) -> Option<R> {
+    fn pop<R>(
+        &mut self,
+        on_pop: impl Fn(&T, usize) -> Option<R>,
+        on_fail: impl Fn(usize),
+    ) -> Option<R> {
         if self.head.is_null() {
             //it's empty!
             debug_assert_eq!(self.length, 0);
@@ -80,9 +84,11 @@ impl<T> IntrusiveLinkedListInner<T> {
         unsafe {
             let tail = &*self.tail;
             debug_assert!(tail.is_on_queue.get());
+            let ret = on_pop(&tail.data, self.length);
+            ret.as_ref()?;
             tail.remove(self);
             debug_assert!(!tail.is_on_queue.get());
-            Some(on_pop(&tail.data, self.length))
+            ret
         }
     }
 }
@@ -409,7 +415,8 @@ mod tests {
         queue.pop(
             |v, len| {
                 assert_eq!(*v, 32);
-                assert_eq!(len, 2);
+                assert_eq!(len, 3);
+                Some(())
             },
             |_| panic!("shouldn't fail"),
         );
@@ -417,7 +424,8 @@ mod tests {
         queue.pop(
             |v, len| {
                 assert_eq!(*v, 42);
-                assert_eq!(len, 1);
+                assert_eq!(len, 2);
+                Some(())
             },
             |_| panic!("shouldn't fail"),
         );
@@ -425,14 +433,15 @@ mod tests {
         queue.pop(
             |v, len| {
                 assert_eq!(*v, 21);
-                assert_eq!(len, 0);
+                assert_eq!(len, 1);
+                Some(())
             },
             |_| panic!("shouldn't fail"),
         );
         assert_eq!(queue.to_vec(), vec![]);
         let did_fail = Cell::new(false);
         queue.pop(
-            |_v, _len| panic!("shouldn't pop"),
+            |_v, _len| -> Option<()> { panic!("shouldn't pop") },
             |num_left| {
                 assert_eq!(num_left, 0);
                 did_fail.set(true);
