@@ -15,6 +15,29 @@ where
     state: AtomicU8,
 }
 
+impl<E> RawMutexImpl<E>
+where
+    E: EventApi,
+{
+    fn spin_for_lock(&self) -> bool {
+        let mut state = self.state.load(Ordering::Relaxed);
+        for _ in 0..10 {
+            if let Err(new_state) = self.state.compare_exchange_weak(
+                state & !LOCKED_BIT,
+                state & LOCKED_BIT,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                state = new_state;
+            } else {
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+        false
+    }
+}
+
 unsafe impl<E> lock_api::RawMutex for RawMutexImpl<E>
 where
     E: EventApi,
@@ -26,11 +49,12 @@ where
     type GuardMarker = lock_api::GuardSend;
 
     fn lock(&self) {
-        if self.try_lock() {
+        if self.spin_for_lock() {
             return;
         }
+
         let mut listener = self.event.new_listener();
-        while !self.try_lock() {
+        loop {
             let did_register = listener.register_with_callback(|| {
                 let old_state = self.state.swap(WAIT_BIT | LOCKED_BIT, Ordering::Acquire);
                 if old_state & LOCKED_BIT == 0 {
@@ -50,23 +74,14 @@ where
                 return;
             }
             listener.wait();
+            if self.try_lock() {
+                return;
+            }
         }
     }
 
     fn try_lock(&self) -> bool {
-        let mut state = self.state.load(Ordering::Relaxed);
-        while state & LOCKED_BIT == 0 {
-            match self.state.compare_exchange_weak(
-                state,
-                state | LOCKED_BIT,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return true,
-                Err(s) => state = s,
-            }
-        }
-        false
+        self.state.fetch_or(LOCKED_BIT, Ordering::Acquire) & LOCKED_BIT == 0
     }
 
     unsafe fn unlock(&self) {
