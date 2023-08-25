@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+mod spinwait;
+
 use event_zero::{Event, EventApi, Listener};
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -35,6 +37,23 @@ where
         }
         false
     }
+
+    fn try_lock_spin(&self, state: &mut u8) -> bool {
+        let mut spin_wait = spinwait::SpinWait::new();
+        while spin_wait.spin() {
+            if let Err(new_state) = self.state.compare_exchange_weak(
+                *state & !LOCKED_BIT,
+                *state | LOCKED_BIT,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                *state = new_state;
+            } else {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 unsafe impl<E> lock_api::RawMutex for RawMutexImpl<E>
@@ -49,15 +68,18 @@ where
 
     fn lock(&self) {
         let mut state = self.state.load(Ordering::Acquire);
-        if self.try_lock_internal(&mut state) {
+        if self.try_lock_spin(&mut state) {
             return;
         }
 
         let mut listener = self.event.new_listener();
 
         state = self.state.load(Ordering::Relaxed);
+        if self.try_lock_internal(&mut state) {
+            return;
+        }
 
-        while !self.try_lock_internal(&mut state) {
+        loop {
             let did_register = listener.register_if(|| {
                 let mut state = self.state.load(Ordering::Acquire);
                 loop {
@@ -94,6 +116,9 @@ where
             }
             listener.wait();
             state = self.state.load(Ordering::Acquire);
+            if self.try_lock_spin(&mut state) {
+                return;
+            }
         }
     }
 
