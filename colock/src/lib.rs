@@ -55,20 +55,36 @@ where
 
         let mut listener = self.event.new_listener();
 
-        state = self.state.load(Ordering::Acquire);
+        state = self.state.load(Ordering::Relaxed);
 
         while !self.try_lock_internal(&mut state) {
             let did_register = listener.register_if(|| {
-                let old_state = self.state.swap(WAIT_BIT | LOCKED_BIT, Ordering::Acquire);
-                if old_state & LOCKED_BIT == 0 {
-                    // we took the lock abort the register
-                    if old_state & WAIT_BIT == 0 {
-                        // we were the only waiter
-                        self.state.store(LOCKED_BIT, Ordering::Relaxed);
+                let mut state = self.state.load(Ordering::Acquire);
+                loop {
+                    let target = if state & LOCKED_BIT == 0 {
+                        state | LOCKED_BIT
+                    } else if state & WAIT_BIT == 0 {
+                        state | WAIT_BIT
+                    } else {
+                        // wait bit is already set!
+                        return true;
+                    };
+                    match self.state.compare_exchange_weak(
+                        state,
+                        target,
+                        Ordering::Acquire,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => {
+                            if state & LOCKED_BIT == 0 {
+                                // we got the lock!
+                                return false;
+                            }
+                            // we registered to wait!
+                            return true;
+                        }
+                        Err(new_state) => state = new_state,
                     }
-                    false
-                } else {
-                    true
                 }
             });
             if !did_register {
@@ -82,19 +98,8 @@ where
     }
 
     fn try_lock(&self) -> bool {
-        let mut state = self.state.load(Ordering::Relaxed);
-        while let Err(new_state) = self.state.compare_exchange(
-            state & !LOCKED_BIT,
-            state | LOCKED_BIT,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        ) {
-            state = new_state;
-            if state & LOCKED_BIT != 0 {
-                return false;
-            }
-        }
-        true
+        let mut state = self.state.load(Ordering::Acquire);
+        self.try_lock_internal(&mut state)
     }
 
     unsafe fn unlock(&self) {
@@ -103,7 +108,7 @@ where
             state,
             state & !LOCKED_BIT,
             Ordering::Release,
-            Ordering::Acquire,
+            Ordering::Relaxed,
         ) {
             state = new_state;
         }
