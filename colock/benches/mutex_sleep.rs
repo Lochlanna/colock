@@ -5,8 +5,8 @@ mod shared;
 use shared::*;
 
 use core::fmt;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use itertools::Itertools;
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+
 use std::fmt::Display;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -88,7 +88,7 @@ const MAX_OUTSIDE: usize = 2;
 const OUTSIDE_STEP: usize = 2;
 
 fn criterion_benchmark(c: &mut Criterion) {
-    let mut group = c.benchmark_group("mutex sleep");
+    let _group = c.benchmark_group("mutex sleep");
 
     // group.bench_function("colcok", |b| {
     //     let padded_lock = ([0u8; 300], colock::Mutex::new(0.0), [0u8; 300]);

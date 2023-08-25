@@ -5,8 +5,8 @@ mod shared;
 use shared::*;
 
 use core::fmt;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use itertools::Itertools;
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+
 use std::fmt::Display;
 use std::thread;
 use std::time::{Duration, Instant};
