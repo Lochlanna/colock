@@ -12,10 +12,10 @@ use intrusive_list::{IntrusiveList, IntrusiveToken};
 use parker::Parker;
 
 pub trait Listener {
-    fn register_with_callback(&mut self, callback: impl Fn() -> bool) -> bool;
+    fn register_if(&mut self, condition: impl Fn() -> bool) -> bool;
     //TODO pin me!
     fn register(&mut self) {
-        self.register_with_callback(|| true);
+        self.register_if(|| true);
     }
     //TODO pin me!
     fn wait(&mut self);
@@ -29,10 +29,9 @@ pub trait EventApi {
     fn new_listener(&self) -> Self::Listener<'_>;
 
     fn notify_one(&self) -> bool {
-        self.notify_one_with_callback(|_| true, |_| {})
+        self.notify_if(|_| true, |_| {})
     }
-    fn notify_one_with_callback(&self, on_success: impl Fn(usize)->bool, on_fail: impl Fn(usize))
-        -> bool;
+    fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn(usize)) -> bool;
 }
 
 pub struct EventImpl<L>
@@ -69,19 +68,15 @@ impl EventApi for EventImpl<IntrusiveLinkedList<Parker>> {
         })
     }
 
-    fn notify_one_with_callback(
-        &self,
-        on_success: impl Fn(usize)->bool,
-        on_fail: impl Fn(usize),
-    ) -> bool {
-        if let Some(unpark_handle) = self.inner.pop(
+    fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn(usize)) -> bool {
+        if let Some(unpark_handle) = self.inner.pop_if(
             |parker, num_left| {
-                if !on_success(num_left) {
+                if !condition(num_left) {
                     return None;
                 }
                 Some(parker.unpark_handle())
             },
-            on_fail,
+            on_empty,
         ) {
             unpark_handle.un_park();
             return true;
@@ -123,10 +118,10 @@ impl<L> Listener for EventTokenImpl<'_, L>
 where
     L: IntrusiveList<Parker>,
 {
-    fn register_with_callback(&mut self, should_register: impl Fn() -> bool) -> bool {
+    fn register_if(&mut self, condition: impl Fn() -> bool) -> bool {
         debug_assert!(!self.is_on_queue);
         self.list_token.inner().prepare_park();
-        let did_push = self.list_token.push_with_callback(should_register);
+        let did_push = self.list_token.push_if(condition);
         if did_push {
             self.is_on_queue = true;
         }
@@ -200,7 +195,7 @@ mod tests {
                 barrier.wait();
             });
             barrier.wait();
-            let handle = event.inner.pop(
+            let handle = event.inner.pop_if(
                 |p, _| Some(p.unpark_handle()),
                 |_| panic!("shouldn't fail to pop"),
             );

@@ -3,9 +3,9 @@ pub mod intrusive_linked_list;
 use crate::maybe_ref::MaybeRef;
 
 pub trait IntrusiveToken<T> {
-    fn push_with_callback(&self, should_push: impl Fn() -> bool) -> bool;
+    fn push_if(&self, condition: impl Fn() -> bool) -> bool;
     fn push(&self) {
-        self.push_with_callback(|| true);
+        self.push_if(|| true);
     }
     fn revoke(&self) -> bool;
     fn inner(&self) -> &T;
@@ -19,7 +19,11 @@ pub trait IntrusiveList<T> {
         Self: 'a,
         T: 'a;
     type Node: Node<T>;
-    fn pop<R>(&self, on_pop: impl Fn(&T, usize) -> Option<R>, on_fail: impl Fn(usize)) -> Option<R>;
+    fn pop_if<R>(
+        &self,
+        condition: impl Fn(&T, usize) -> Option<R>,
+        on_empty: impl Fn(usize),
+    ) -> Option<R>;
 
     fn build_node(data: T) -> Self::Node;
     fn build_token<'a>(&'a self, node: impl Into<MaybeRef<'a, Self::Node>>) -> Self::Token<'a>
@@ -31,7 +35,7 @@ where
     T: Clone,
 {
     fn pop_clone(&self) -> Option<T> {
-        self.pop(|v, _| Some(v.clone()), |_| {})
+        self.pop_if(|v, _| Some(v.clone()), |_| {})
     }
 }
 

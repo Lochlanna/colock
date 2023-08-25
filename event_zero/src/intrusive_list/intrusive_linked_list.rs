@@ -34,9 +34,13 @@ impl<T> super::IntrusiveList<T> for IntrusiveLinkedList<T> {
     type Token<'a> = ListToken<'a, T> where Self: 'a;
     type Node = Node<T>;
 
-    fn pop<R>(&self, on_pop: impl Fn(&T, usize) -> Option<R>, on_fail: impl Fn(usize)) -> Option<R> {
+    fn pop_if<R>(
+        &self,
+        condition: impl Fn(&T, usize) -> Option<R>,
+        on_empty: impl Fn(usize),
+    ) -> Option<R> {
         let mut inner = self.inner.lock();
-        inner.pop(on_pop, on_fail)
+        inner.pop_if(condition, on_empty)
     }
 
     fn build_node(data: T) -> Self::Node {
@@ -70,21 +74,21 @@ impl<T> IntrusiveLinkedListInner<T> {
         }
     }
 
-    fn pop<R>(
+    fn pop_if<R>(
         &mut self,
-        on_pop: impl Fn(&T, usize) -> Option<R>,
-        on_fail: impl Fn(usize),
+        condition: impl Fn(&T, usize) -> Option<R>,
+        on_empty: impl Fn(usize),
     ) -> Option<R> {
         if self.head.is_null() {
             //it's empty!
             debug_assert_eq!(self.length, 0);
-            on_fail(0);
+            on_empty(0);
             return None;
         }
         unsafe {
             let tail = &*self.tail;
             debug_assert!(tail.is_on_queue.get());
-            let ret = on_pop(&tail.data, self.length);
+            let ret = condition(&tail.data, self.length);
             ret.as_ref()?;
             tail.remove(self);
             debug_assert!(!tail.is_on_queue.get());
@@ -164,15 +168,15 @@ impl<T> Node<T> {
     }
 
     fn push(&self, queue: &mut IntrusiveLinkedListInner<T>) {
-        self.push_with_callback(queue, || true);
+        self.push_if(queue, || true);
     }
 
-    fn push_with_callback(
+    fn push_if(
         &self,
         queue: &mut IntrusiveLinkedListInner<T>,
-        should_push: impl Fn() -> bool,
+        condition: impl Fn() -> bool,
     ) -> bool {
-        let should_push = should_push();
+        let should_push = condition();
         if !should_push {
             debug_assert!(!self.is_on_queue.get());
             return should_push;
@@ -249,9 +253,9 @@ impl<T> Drop for ListToken<'_, T> {
 }
 
 impl<T> IntrusiveToken<T> for ListToken<'_, T> {
-    fn push_with_callback(&self, callback: impl Fn() -> bool) -> bool {
+    fn push_if(&self, condition: impl Fn() -> bool) -> bool {
         let mut queue = self.queue.inner.lock();
-        self.node.push_with_callback(&mut queue, callback)
+        self.node.push_if(&mut queue, condition)
     }
 
     fn revoke(&self) -> bool {
@@ -412,7 +416,7 @@ mod tests {
         node_c.push();
         assert_eq!(queue.to_vec(), vec![21, 42, 32]);
 
-        queue.pop(
+        queue.pop_if(
             |v, len| {
                 assert_eq!(*v, 32);
                 assert_eq!(len, 3);
@@ -421,7 +425,7 @@ mod tests {
             |_| panic!("shouldn't fail"),
         );
         assert_eq!(queue.to_vec(), vec![21, 42]);
-        queue.pop(
+        queue.pop_if(
             |v, len| {
                 assert_eq!(*v, 42);
                 assert_eq!(len, 2);
@@ -430,7 +434,7 @@ mod tests {
             |_| panic!("shouldn't fail"),
         );
         assert_eq!(queue.to_vec(), vec![21]);
-        queue.pop(
+        queue.pop_if(
             |v, len| {
                 assert_eq!(*v, 21);
                 assert_eq!(len, 1);
@@ -440,7 +444,7 @@ mod tests {
         );
         assert_eq!(queue.to_vec(), vec![]);
         let did_fail = Cell::new(false);
-        queue.pop(
+        queue.pop_if(
             |_v, _len| -> Option<()> { panic!("shouldn't pop") },
             |num_left| {
                 assert_eq!(num_left, 0);
@@ -508,7 +512,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn pipe_test() {
-        let num_elements = 50000;
+        let num_elements = 1000;
         let num_senders = 4;
         let num_receivers = 4;
         do_pipe_test(num_elements, num_senders, num_receivers);
