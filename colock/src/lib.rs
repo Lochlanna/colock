@@ -2,7 +2,7 @@
 
 mod spinwait;
 
-use event_zero::{Event, EventApi, Listener};
+use event_zero::{Event, Listenable, Listener, Notifiable};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 const LOCKED_BIT: u8 = 1;
@@ -12,7 +12,7 @@ const FAIR_BIT: u8 = 4;
 #[derive(Debug)]
 pub struct RawMutexImpl<E>
 where
-    E: EventApi,
+    E: Listenable + Notifiable,
 {
     event: E,
     state: AtomicU8,
@@ -20,7 +20,7 @@ where
 
 impl<E> RawMutexImpl<E>
 where
-    E: EventApi,
+    E: Listenable + Notifiable,
 {
     #[inline(always)]
     fn try_lock_once(&self, state: &mut u8) -> bool {
@@ -63,7 +63,7 @@ where
 
 unsafe impl<E> lock_api::RawMutex for RawMutexImpl<E>
 where
-    E: EventApi,
+    E: Listenable + Notifiable,
 {
     const INIT: Self = RawMutexImpl {
         event: E::NEW,
@@ -183,7 +183,7 @@ where
 
 unsafe impl<E> lock_api::RawMutexFair for RawMutexImpl<E>
 where
-    E: EventApi,
+    E: Listenable + Notifiable,
 {
     unsafe fn unlock_fair(&self) {
         if self

@@ -7,6 +7,7 @@ mod parker;
 
 use crate::intrusive_list::intrusive_linked_list::Node;
 use crate::parker::State;
+use core::task::Waker;
 use intrusive_list::intrusive_linked_list::IntrusiveLinkedList;
 use intrusive_list::{IntrusiveList, IntrusiveToken};
 use parker::Parker;
@@ -20,18 +21,26 @@ pub trait Listener {
     //TODO pin me!
     fn wait(&mut self);
 }
-pub trait EventApi {
-    #[allow(clippy::declare_interior_mutable_const)]
+pub trait Listenable {
     const NEW: Self;
     type Listener<'a>: Listener
     where
         Self: 'a;
     fn new_listener(&self) -> Self::Listener<'_>;
+}
 
+pub trait Notifiable {
     fn notify_one(&self) -> bool {
         self.notify_if(|_| true, || {})
     }
     fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn()) -> bool;
+}
+
+pub trait AsyncListenable {
+    type Listener<'a>: Listener
+    where
+        Self: 'a;
+    fn new_async_listener(&self, waker: Waker) -> Self::Listener<'_>;
 }
 
 pub struct EventImpl<L>
@@ -49,7 +58,7 @@ where
         Self { inner: L::NEW }
     }
 }
-impl EventApi for EventImpl<IntrusiveLinkedList<Parker>> {
+impl Listenable for EventImpl<IntrusiveLinkedList<Parker>> {
     #[allow(clippy::declare_interior_mutable_const)]
     const NEW: Self = Self::new();
     type Listener<'a> = EventTokenImpl<'a, IntrusiveLinkedList<Parker>> where Self: 'a;
@@ -67,7 +76,8 @@ impl EventApi for EventImpl<IntrusiveLinkedList<Parker>> {
             }
         })
     }
-
+}
+impl Notifiable for EventImpl<IntrusiveLinkedList<Parker>> {
     fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn()) -> bool {
         if let Some(unpark_handle) = self.inner.pop_if(
             |parker, num_left| {
@@ -85,8 +95,18 @@ impl EventApi for EventImpl<IntrusiveLinkedList<Parker>> {
     }
 }
 
-pub type Event = EventImpl<IntrusiveLinkedList<Parker>>;
-pub type Token<'a> = EventTokenImpl<'a, IntrusiveLinkedList<Parker>>;
+impl AsyncListenable for EventImpl<IntrusiveLinkedList<Parker>> {
+    type Listener<'a> = EventTokenImpl<'a, IntrusiveLinkedList<Parker>> where Self: 'a;
+    fn new_async_listener(&self, waker: Waker) -> Self::Listener<'_> {
+        let node = Node::new(Parker::new_with_waker(waker));
+        EventTokenImpl {
+            event: self,
+            list_token: self.inner.build_token(node),
+            is_on_queue: false,
+        }
+    }
+}
+
 pub struct EventTokenImpl<'a, L>
 where
     L: IntrusiveList<Parker>,
@@ -133,6 +153,9 @@ where
     }
 }
 
+pub type Event = EventImpl<IntrusiveLinkedList<Parker>>;
+pub type Token<'a> = EventTokenImpl<'a, IntrusiveLinkedList<Parker>>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,7 +170,7 @@ mod tests {
         thread::scope(|s| {
             s.spawn(|| {
                 barrier.wait();
-                thread::sleep(std::time::Duration::from_millis(50));
+                thread::sleep(Duration::from_millis(50));
                 test_val.store(true, Ordering::SeqCst);
                 debug_assert!(event.notify_one());
                 barrier.wait();
@@ -175,7 +198,7 @@ mod tests {
                 barrier.wait();
             });
             barrier.wait();
-            thread::sleep(std::time::Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(50));
             assert!(!event.notify_one());
             barrier.wait();
         });
