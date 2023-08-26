@@ -37,7 +37,7 @@ impl<T> super::IntrusiveList<T> for IntrusiveLinkedList<T> {
     fn pop_if<R>(
         &self,
         condition: impl Fn(&T, usize) -> Option<R>,
-        on_empty: impl Fn(usize),
+        on_empty: impl Fn(),
     ) -> Option<R> {
         let mut inner = self.inner.lock();
         inner.pop_if(condition, on_empty)
@@ -77,12 +77,12 @@ impl<T> IntrusiveLinkedListInner<T> {
     fn pop_if<R>(
         &mut self,
         condition: impl Fn(&T, usize) -> Option<R>,
-        on_empty: impl Fn(usize),
+        on_empty: impl Fn(),
     ) -> Option<R> {
         if self.head.is_null() {
             //it's empty!
             debug_assert_eq!(self.length, 0);
-            on_empty(0);
+            on_empty();
             return None;
         }
         unsafe {
@@ -422,7 +422,7 @@ mod tests {
                 assert_eq!(len, 3);
                 Some(())
             },
-            |_| panic!("shouldn't fail"),
+            || panic!("shouldn't fail"),
         );
         assert_eq!(queue.to_vec(), vec![21, 42]);
         queue.pop_if(
@@ -431,7 +431,7 @@ mod tests {
                 assert_eq!(len, 2);
                 Some(())
             },
-            |_| panic!("shouldn't fail"),
+            || panic!("shouldn't fail"),
         );
         assert_eq!(queue.to_vec(), vec![21]);
         queue.pop_if(
@@ -440,14 +440,13 @@ mod tests {
                 assert_eq!(len, 1);
                 Some(())
             },
-            |_| panic!("shouldn't fail"),
+            || panic!("shouldn't fail"),
         );
         assert_eq!(queue.to_vec(), vec![]);
         let did_fail = Cell::new(false);
         queue.pop_if(
             |_v, _len| -> Option<()> { panic!("shouldn't pop") },
-            |num_left| {
-                assert_eq!(num_left, 0);
+            || {
                 did_fail.set(true);
             },
         );

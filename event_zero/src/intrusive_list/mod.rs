@@ -22,7 +22,7 @@ pub trait IntrusiveList<T> {
     fn pop_if<R>(
         &self,
         condition: impl Fn(&T, usize) -> Option<R>,
-        on_empty: impl Fn(usize),
+        on_empty: impl Fn(),
     ) -> Option<R>;
 
     fn build_node(data: T) -> Self::Node;
@@ -35,7 +35,7 @@ where
     T: Clone,
 {
     fn pop_clone(&self) -> Option<T> {
-        self.pop_if(|v, _| Some(v.clone()), |_| {})
+        self.pop_if(|v, _| Some(v.clone()), || {})
     }
 }
 

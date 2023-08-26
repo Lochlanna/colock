@@ -22,7 +22,7 @@ where
     E: EventApi,
 {
     #[inline(always)]
-    fn try_lock_internal(&self, state: &mut u8) -> bool {
+    fn try_lock_once(&self, state: &mut u8) -> bool {
         while *state & LOCKED_BIT == 0 {
             if let Err(new_state) = self.state.compare_exchange_weak(
                 *state,
@@ -84,7 +84,17 @@ where
         let mut listener = self.event.new_listener();
 
         state = self.state.load(Ordering::Relaxed);
-        if self.try_lock_internal(&mut state) {
+        if state & LOCKED_BIT == 0
+            && self
+                .state
+                .compare_exchange(
+                    state,
+                    state | LOCKED_BIT,
+                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+        {
             return;
         }
 
@@ -92,18 +102,16 @@ where
             let did_register = listener.register_if(|| {
                 let mut state = self.state.load(Ordering::Relaxed);
                 loop {
-                    let target = if state & LOCKED_BIT == 0 {
-                        state | LOCKED_BIT
-                    } else if state & WAIT_BIT == 0 {
-                        state | WAIT_BIT
-                    } else {
-                        // wait bit is already set!
-                        return true;
+                    let (target, ordering) = match state {
+                        0 => (LOCKED_BIT, Ordering::Acquire),
+                        LOCKED_BIT => (LOCKED_BIT | WAIT_BIT, Ordering::Relaxed),
+                        WAIT_BIT => (LOCKED_BIT | WAIT_BIT, Ordering::Acquire),
+                        _ => return true,
                     };
                     match self.state.compare_exchange_weak(
                         state,
                         target,
-                        Ordering::Acquire,
+                        ordering,
                         Ordering::Relaxed,
                     ) {
                         Ok(_) => {
@@ -124,7 +132,7 @@ where
                 return;
             }
             listener.wait();
-            state = self.state.load(Ordering::Acquire);
+            state = self.state.load(Ordering::Relaxed);
             if self.try_lock_spin(&mut state) {
                 return;
             }
@@ -133,19 +141,11 @@ where
 
     fn try_lock(&self) -> bool {
         let mut state = self.state.load(Ordering::Acquire);
-        self.try_lock_internal(&mut state)
+        self.try_lock_once(&mut state)
     }
 
     unsafe fn unlock(&self) {
-        let mut state = self.state.load(Ordering::Relaxed);
-        while let Err(new_state) = self.state.compare_exchange_weak(
-            state,
-            state & !LOCKED_BIT,
-            Ordering::Release,
-            Ordering::Relaxed,
-        ) {
-            state = new_state;
-        }
+        let state = self.state.fetch_and(!LOCKED_BIT, Ordering::Release);
         if state & WAIT_BIT == 0 {
             return;
         }
@@ -162,9 +162,7 @@ where
                 }
                 true
             },
-            |_| {
-                // panic!("didn't expect to fail...");
-            },
+            || {},
         );
     }
 

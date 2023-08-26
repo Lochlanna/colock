@@ -29,9 +29,9 @@ pub trait EventApi {
     fn new_listener(&self) -> Self::Listener<'_>;
 
     fn notify_one(&self) -> bool {
-        self.notify_if(|_| true, |_| {})
+        self.notify_if(|_| true, || {})
     }
-    fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn(usize)) -> bool;
+    fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn()) -> bool;
 }
 
 pub struct EventImpl<L>
@@ -68,7 +68,7 @@ impl EventApi for EventImpl<IntrusiveLinkedList<Parker>> {
         })
     }
 
-    fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn(usize)) -> bool {
+    fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn()) -> bool {
         if let Some(unpark_handle) = self.inner.pop_if(
             |parker, num_left| {
                 if !condition(num_left) {
@@ -197,7 +197,7 @@ mod tests {
             barrier.wait();
             let handle = event.inner.pop_if(
                 |p, _| Some(p.unpark_handle()),
-                |_| panic!("shouldn't fail to pop"),
+                || panic!("shouldn't fail to pop"),
             );
             barrier.wait();
             thread::sleep(Duration::from_millis(20));
