@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 const LOCKED_BIT: u8 = 1;
 const WAIT_BIT: u8 = 2;
+const FAIR_BIT: u8 = 4;
 
 #[derive(Debug)]
 pub struct RawMutexImpl<E>
@@ -133,6 +134,10 @@ where
             }
             listener.wait();
             state = self.state.load(Ordering::Relaxed);
+            if state & FAIR_BIT != 0 {
+                self.state.fetch_and(!FAIR_BIT, Ordering::Relaxed);
+                return;
+            }
             if self.try_lock_spin(&mut state) {
                 return;
             }
@@ -173,6 +178,36 @@ where
 
     fn is_locked(&self) -> bool {
         self.state.load(Ordering::Relaxed) & LOCKED_BIT != 0
+    }
+}
+
+unsafe impl<E> lock_api::RawMutexFair for RawMutexImpl<E>
+where
+    E: EventApi,
+{
+    unsafe fn unlock_fair(&self) {
+        if self
+            .state
+            .compare_exchange(LOCKED_BIT, 0, Ordering::Release, Ordering::Relaxed)
+            .is_ok()
+        {
+            return;
+        }
+        self.event.notify_if(
+            |num_waiters_left| {
+                if num_waiters_left == 1 {
+                    self.state.store(FAIR_BIT | LOCKED_BIT, Ordering::Relaxed);
+                } else {
+                    self.state
+                        .store(FAIR_BIT | WAIT_BIT | LOCKED_BIT, Ordering::Relaxed);
+                }
+                true
+            },
+            || {
+                //unlock it as they've canceled the wait
+                self.state.store(0, Ordering::Release);
+            },
+        );
     }
 }
 
