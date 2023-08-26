@@ -41,15 +41,19 @@ where
     fn try_lock_spin(&self, state: &mut u8) -> bool {
         let mut spin_wait = spinwait::SpinWait::new();
         while spin_wait.spin() {
-            if let Err(new_state) = self.state.compare_exchange_weak(
-                *state & !LOCKED_BIT,
-                *state | LOCKED_BIT,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
-                *state = new_state;
+            if *state & LOCKED_BIT == 0 {
+                if let Err(new_state) = self.state.compare_exchange_weak(
+                    *state,
+                    *state | LOCKED_BIT,
+                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                ) {
+                    *state = new_state;
+                } else {
+                    return true;
+                }
             } else {
-                return true;
+                *state = self.state.load(Ordering::Relaxed);
             }
         }
         false
@@ -67,7 +71,12 @@ where
     type GuardMarker = lock_api::GuardSend;
 
     fn lock(&self) {
-        let mut state = self.state.load(Ordering::Acquire);
+        let Err(mut state) =
+            self.state
+                .compare_exchange_weak(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
+        else {
+            return;
+        };
         if self.try_lock_spin(&mut state) {
             return;
         }
@@ -81,7 +90,7 @@ where
 
         loop {
             let did_register = listener.register_if(|| {
-                let mut state = self.state.load(Ordering::Acquire);
+                let mut state = self.state.load(Ordering::Relaxed);
                 loop {
                     let target = if state & LOCKED_BIT == 0 {
                         state | LOCKED_BIT
@@ -143,6 +152,11 @@ where
 
         self.event.notify_if(
             |num_waiters_left| {
+                let state = self.state.load(Ordering::Relaxed);
+                if state & LOCKED_BIT == 1 {
+                    //the lock has already been locked by someone else don't bother waking a thread
+                    return false;
+                }
                 if num_waiters_left == 1 {
                     self.state.fetch_and(!WAIT_BIT, Ordering::Relaxed);
                 }

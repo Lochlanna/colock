@@ -90,7 +90,7 @@ impl<T> Mutex<T> for usync::Mutex<T> {
     {
         f(&mut *self.lock())
     }
-     
+
     fn lock_timed<F, R>(&self, f: F) -> (std::time::Duration, R)
     where
         F: FnOnce(&mut T) -> R,

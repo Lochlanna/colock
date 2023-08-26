@@ -27,7 +27,6 @@ impl SpinWait {
     #[inline]
     pub const fn new() -> Self {
         Self { counter: 0 }
-
     }
 
     /// Resets a `SpinWait` to its initial state.
