@@ -6,12 +6,14 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 enum ParkInner {
     ThreadParker(thread_parker::ThreadParker),
+    Waker(core::task::Waker),
 }
 
 impl Debug for ParkInner {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             ParkInner::ThreadParker(_) => f.write_str("thread"),
+            ParkInner::Waker(_) => f.write_str("waker"),
         }
     }
 }
@@ -38,6 +40,13 @@ impl Parker {
         }
     }
 
+    pub const fn new_with_waker(waker: core::task::Waker) -> Self {
+        Self {
+            inner: ParkInner::Waker(waker),
+            should_park: AtomicU8::new(State::Waiting as u8),
+        }
+    }
+
     pub fn prepare_park(&self) {
         self.should_park
             .store(State::Waiting as u8, Ordering::Relaxed);
@@ -45,6 +54,7 @@ impl Parker {
             ParkInner::ThreadParker(parker) => unsafe {
                 parker.prepare_park();
             },
+            ParkInner::Waker(_) => {}
         }
     }
     pub fn park(&self) {
@@ -54,6 +64,7 @@ impl Parker {
                     unsafe { thread.park() }
                 }
             }
+            ParkInner::Waker(_) => {}
         }
 
         while self.should_park.load(Ordering::Acquire) == State::Notifying as u8 {
@@ -90,6 +101,7 @@ impl UnparkHandle {
         if did_unpark {
             match &parker.inner {
                 ParkInner::ThreadParker(thread) => unsafe { thread.unpark() },
+                ParkInner::Waker(waker) => waker.wake_by_ref(),
             }
         }
         parker
