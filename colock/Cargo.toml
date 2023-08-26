@@ -25,12 +25,6 @@ usync = "0.2.1"
 name = "mutex"
 harness = false
 
-
-[[bench]]
-name = "mutex_uncontested"
-harness = false
-
-
 [[bench]]
 name = "mutex_worst_latency"
 harness = false

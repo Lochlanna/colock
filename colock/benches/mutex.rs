@@ -78,7 +78,7 @@ fn run_benchmark<M: Mutex<f64> + Send + Sync>(run: &Run, num_iters: u64) -> Dura
 }
 
 const MIN_THREADS: usize = 1;
-const MAX_THREADS: usize = 2;
+const MAX_THREADS: usize = 3;
 
 const MIN_INSIDE: usize = 1;
 const MAX_INSIDE: usize = 2;

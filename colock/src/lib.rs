@@ -140,7 +140,12 @@ where
     }
 
     fn try_lock(&self) -> bool {
-        let mut state = self.state.load(Ordering::Acquire);
+        let Err(mut state) =
+            self.state
+                .compare_exchange_weak(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
+        else {
+            return true;
+        };
         self.try_lock_once(&mut state)
     }
 
@@ -153,7 +158,7 @@ where
         self.event.notify_if(
             |num_waiters_left| {
                 let state = self.state.load(Ordering::Relaxed);
-                if state & LOCKED_BIT == 1 {
+                if state & LOCKED_BIT != 0 {
                     //the lock has already been locked by someone else don't bother waking a thread
                     return false;
                 }
