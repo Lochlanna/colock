@@ -101,17 +101,17 @@ fn criterion_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("parking_lot", run), &run, |b, run| {
             b.iter_custom(|iters| run_benchmark::<parking_lot::Mutex<f64>>(run, iters))
         });
-        // group.bench_with_input(BenchmarkId::new("usync", run), &run, |b, run| {
-        //     b.iter_custom(|iters| run_benchmark::<usync::Mutex<f64>>(run, iters))
-        // });
-        // group.bench_with_input(BenchmarkId::new("std", run), &run, |b, run| {
-        //     b.iter_custom(|iters| run_benchmark::<std::sync::Mutex<f64>>(run, iters))
-        // });
-        // if cfg!(unix) {
-        //     group.bench_with_input(BenchmarkId::new("pthread", run), &run, |b, run| {
-        //         b.iter_custom(|iters| run_benchmark::<PthreadMutex<f64>>(run, iters))
-        //     });
-        // }
+        group.bench_with_input(BenchmarkId::new("usync", run), &run, |b, run| {
+            b.iter_custom(|iters| run_benchmark::<usync::Mutex<f64>>(run, iters))
+        });
+        group.bench_with_input(BenchmarkId::new("std", run), &run, |b, run| {
+            b.iter_custom(|iters| run_benchmark::<std::sync::Mutex<f64>>(run, iters))
+        });
+        if cfg!(unix) {
+            group.bench_with_input(BenchmarkId::new("pthread", run), &run, |b, run| {
+                b.iter_custom(|iters| run_benchmark::<PthreadMutex<f64>>(run, iters))
+            });
+        }
         // if cfg!(windows) {
         //     group.bench_with_input(BenchmarkId::new("SrwLock", run), &run, |b, run| {
         //         b.iter_custom(|iters| run_benchmark::<SrwLock<f64>>(run, iters))

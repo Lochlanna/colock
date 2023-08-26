@@ -104,7 +104,7 @@ impl<T> Mutex<T> for usync::Mutex<T> {
 }
 
 #[cfg(unix)]
-struct PthreadMutex<T>(UnsafeCell<T>, UnsafeCell<libc::pthread_mutex_t>);
+pub struct PthreadMutex<T>(UnsafeCell<T>, UnsafeCell<libc::pthread_mutex_t>);
 #[cfg(unix)]
 unsafe impl<T> Sync for PthreadMutex<T> {}
 #[cfg(unix)]
