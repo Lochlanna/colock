@@ -94,7 +94,7 @@ mod tests {
     }
 
     #[cfg_attr(miri, ignore)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn it_works_threaded_async() {
         let mutex = Mutex::new(());
         let barrier = tokio::sync::Barrier::new(2);
@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     fn lots_and_lots() {
-        const J: u64 = 10000;
+        const J: u64 = 100000;
         // const J: u64 = 5000000;
         // const J: u64 = 50000000;
         const K: u64 = 6;
@@ -174,7 +174,7 @@ mod tests {
         do_lots_and_lots(J, K);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[cfg_attr(miri, ignore)]
     async fn lots_and_lots_async() {
         const J: u64 = 10000;

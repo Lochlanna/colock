@@ -335,7 +335,7 @@ mod tests {
     }
 
     #[cfg_attr(miri, ignore)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn it_works_threaded_async() {
         let mutex = RawMutex::new();
         let barrier = tokio::sync::Barrier::new(2);

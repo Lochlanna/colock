@@ -1,16 +1,46 @@
 #![allow(dead_code)]
 
-mod shared_async;
-
-use shared_async::*;
-
-use core::fmt;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use itertools::Itertools;
-
+use async_trait::async_trait;
+use std::fmt;
 use std::fmt::Display;
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[async_trait]
+pub trait Mutex<T>: Sync {
+    fn new(v: T) -> Self;
+    async fn lock<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut T) -> R + Send;
+    async fn lock_timed<F, R>(&self, f: F) -> (Duration, R)
+    where
+        F: FnOnce(&mut T) -> R + Send;
+}
+
+#[async_trait]
+impl<T> Mutex<T> for colock::Mutex<T> {
+    fn new(v: T) -> Self {
+        Self::new(v)
+    }
+    async fn lock<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut T) -> R + Send,
+    {
+        f(&mut *self.lock_async().await)
+    }
+
+    async fn lock_timed<F, R>(&self, f: F) -> (std::time::Duration, R)
+    where
+        F: FnOnce(&mut T) -> R + Send,
+    {
+        let start = std::time::Instant::now();
+        let mut guard = self.lock_async().await;
+        let elapsed = start.elapsed();
+        let res = f(&mut *guard);
+        (elapsed, res)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Run {
@@ -33,7 +63,7 @@ impl Display for Run {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} tasks, {} inside, {} outside",
+            "{} threads, {} inside, {} outside",
             self.num_threads, self.num_inside, self.num_outside
         )
     }
@@ -79,7 +109,6 @@ async fn run_benchmark<M: Mutex<f64> + Send + Sync + 'static>(
             })
         })
         .collect::<Vec<_>>();
-
     barrier.wait().await;
 
     let mut min_start = Instant::now();
@@ -91,36 +120,12 @@ async fn run_benchmark<M: Mutex<f64> + Send + Sync + 'static>(
     max_end - min_start
 }
 
-const MIN_THREADS: usize = 1;
-const MAX_THREADS: usize = 3;
-
-const MIN_INSIDE: usize = 1;
-const MAX_INSIDE: usize = 2;
-const INSIDE_STEP: usize = 2;
-
-const MIN_OUTSIDE: usize = 1;
-const MAX_OUTSIDE: usize = 2;
-const OUTSIDE_STEP: usize = 2;
-
-fn criterion_benchmark(c: &mut Criterion) {
-    let tokio_runtime = tokio::runtime::Runtime::new().expect("couldn't spawn tokio runtime");
-
-    let mut group = c.benchmark_group("async/throughput");
-    let runs = (MIN_THREADS..=MAX_THREADS)
-        .cartesian_product((MIN_INSIDE..=MAX_INSIDE).step_by(INSIDE_STEP))
-        .cartesian_product((MIN_OUTSIDE..=MAX_OUTSIDE).step_by(OUTSIDE_STEP))
-        .map(|((a, b), c)| Run::from((a, b, c)));
-    for run in runs {
-        group.bench_with_input(BenchmarkId::new("colock4", run), &run, |b, run| {
-            b.to_async(&tokio_runtime)
-                .iter_custom(|iters| run_benchmark::<colock::Mutex<f64>>(*run, iters))
-        });
-        group.bench_with_input(BenchmarkId::new("tokio", run), &run, |b, run| {
-            b.to_async(&tokio_runtime)
-                .iter_custom(|iters| run_benchmark::<tokio::sync::Mutex<f64>>(*run, iters))
-        });
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn run_bench() {
+    for i in 0..1 {
+        run_benchmark::<colock::Mutex<f64>>(Run::from((2, 1, 1)), 618222).await;
+        println!("done {}", i);
+        std::io::Write::flush(&mut std::io::stdout()).unwrap();
     }
 }
-
-criterion_group!(benches, criterion_benchmark);
-criterion_main!(benches);
