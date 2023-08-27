@@ -5,80 +5,52 @@ mod intrusive_list;
 mod maybe_ref;
 mod parker;
 
-use crate::intrusive_list::intrusive_linked_list::Node;
+use crate::intrusive_list::intrusive_linked_list::{ListToken, Node};
 use crate::parker::State;
 use core::task::Waker;
 use intrusive_list::intrusive_linked_list::IntrusiveLinkedList;
 use intrusive_list::{IntrusiveList, IntrusiveToken};
 use parker::Parker;
 
-pub trait Listener {
-    fn register_if(&mut self, condition: impl Fn() -> bool) -> bool;
-    //TODO pin me!
-    fn register(&mut self) {
-        self.register_if(|| true);
-    }
-    //TODO pin me!
-    fn wait(&mut self);
-}
-pub trait Listenable {
-    const NEW: Self;
-    type Listener<'a>: Listener
-    where
-        Self: 'a;
-    fn new_listener(&self) -> Self::Listener<'_>;
+#[derive(Debug)]
+pub struct Event {
+    inner: IntrusiveLinkedList<Parker>,
 }
 
-pub trait Notifiable {
-    fn notify_one(&self) -> bool {
-        self.notify_if(|_| true, || {})
-    }
-    fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn()) -> bool;
-}
-
-pub trait AsyncListenable {
-    type Listener<'a>: Listener
-    where
-        Self: 'a;
-    fn new_async_listener(&self, waker: Waker) -> Self::Listener<'_>;
-}
-
-pub struct EventImpl<L>
-where
-    L: IntrusiveList<Parker>,
-{
-    inner: L,
-}
-
-impl<L> EventImpl<L>
-where
-    L: IntrusiveList<Parker>,
-{
+impl Event {
     pub const fn new() -> Self {
-        Self { inner: L::NEW }
+        Self {
+            inner: IntrusiveLinkedList::NEW,
+        }
     }
-}
-impl Listenable for EventImpl<IntrusiveLinkedList<Parker>> {
-    #[allow(clippy::declare_interior_mutable_const)]
-    const NEW: Self = Self::new();
-    type Listener<'a> = EventTokenImpl<'a, IntrusiveLinkedList<Parker>> where Self: 'a;
 
-    fn new_listener(&self) -> Self::Listener<'_> {
+    pub fn new_listener(&self) -> EventListener<'_> {
         thread_local! {
             static NODE: Node<Parker> = const {Node::new(Parker::new())}
         }
         NODE.with(|node| {
             let node: &'static Node<Parker> = unsafe { core::mem::transmute(node) };
-            EventTokenImpl {
+            EventListener {
                 event: self,
                 list_token: self.inner.build_token(node),
                 is_on_queue: false,
             }
         })
     }
-}
-impl Notifiable for EventImpl<IntrusiveLinkedList<Parker>> {
-    fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn()) -> bool {
+
+    pub fn new_async_listener(&self, waker: Waker) -> EventListener<'_> {
+        let node = Node::new(Parker::new_with_waker(waker));
+        EventListener {
+            event: self,
+            list_token: self.inner.build_token(node),
+            is_on_queue: false,
+        }
+    }
+
+    pub fn notify_one(&self) -> bool {
+        self.notify_if(|_| true, || {})
+    }
+    pub fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn()) -> bool {
         if let Some(unpark_handle) = self.inner.pop_if(
             |parker, num_left| {
                 if !condition(num_left) {
@@ -94,52 +66,22 @@ impl Notifiable for EventImpl<IntrusiveLinkedList<Parker>> {
         false
     }
 }
-
-impl AsyncListenable for EventImpl<IntrusiveLinkedList<Parker>> {
-    type Listener<'a> = EventTokenImpl<'a, IntrusiveLinkedList<Parker>> where Self: 'a;
-    fn new_async_listener(&self, waker: Waker) -> Self::Listener<'_> {
-        let node = Node::new(Parker::new_with_waker(waker));
-        EventTokenImpl {
-            event: self,
-            list_token: self.inner.build_token(node),
-            is_on_queue: false,
-        }
-    }
-}
-
-pub struct EventTokenImpl<'a, L>
-where
-    L: IntrusiveList<Parker>,
-{
-    event: &'a EventImpl<L>,
-    list_token: L::Token<'a>,
+#[derive(Debug)]
+pub struct EventListener<'a> {
+    event: &'a Event,
+    list_token: ListToken<'a, Parker>,
     is_on_queue: bool,
 }
 
-impl<L> Drop for EventTokenImpl<'_, L>
-where
-    L: IntrusiveList<Parker>,
-{
+impl Drop for EventListener<'_> {
     fn drop(&mut self) {
-        if !self.is_on_queue {
-            return;
-        }
-        if self.list_token.revoke() {
-            return;
-        }
-        while self.list_token.inner().get_state() != State::Notified {
-            // the list token has already been revoked but we haven't been woken up yet!
-            core::hint::spin_loop()
-        }
+        self.cancel();
     }
 }
 
-impl<L> Listener for EventTokenImpl<'_, L>
-where
-    L: IntrusiveList<Parker>,
-{
-    fn register_if(&mut self, condition: impl Fn() -> bool) -> bool {
-        debug_assert!(!self.is_on_queue);
+impl EventListener<'_> {
+    pub fn register_if(&mut self, condition: impl Fn() -> bool) -> bool {
+        debug_assert!(!self.is_on_queue || self.list_token.inner().get_state() == State::Notified);
         self.list_token.inner().prepare_park();
         let did_push = self.list_token.push_if(condition);
         if did_push {
@@ -147,14 +89,34 @@ where
         }
         did_push
     }
-    fn wait(&mut self) {
+
+    pub fn register(&mut self) {
+        self.register_if(|| true);
+    }
+    pub fn wait(&mut self) {
         self.list_token.inner().park();
         self.is_on_queue = false;
     }
-}
+    pub fn is_on_queue(&self) -> bool {
+        self.is_on_queue
+    }
 
-pub type Event = EventImpl<IntrusiveLinkedList<Parker>>;
-pub type Token<'a> = EventTokenImpl<'a, IntrusiveLinkedList<Parker>>;
+    /// Returns true if the cancellation was successful (had not been woken up)
+    pub fn cancel(&mut self) -> bool {
+        if !self.is_on_queue {
+            return true;
+        }
+        self.is_on_queue = false;
+        if self.list_token.revoke() {
+            return true;
+        }
+        while self.list_token.inner().get_state() != State::Notified {
+            // the list token has already been revoked but we haven't been woken up yet!
+            core::hint::spin_loop()
+        }
+        false
+    }
+}
 
 #[cfg(test)]
 mod tests {

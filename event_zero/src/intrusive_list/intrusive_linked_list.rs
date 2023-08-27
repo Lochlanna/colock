@@ -240,6 +240,7 @@ impl<T> Node<T> {
     }
 }
 
+#[derive(Debug)]
 pub struct ListToken<'a, T> {
     queue: &'a IntrusiveLinkedList<T>,
     node: MaybeRef<'a, Node<T>>,
