@@ -24,9 +24,10 @@ windows-targets = "0.48"
 [dev-dependencies]
 itertools = "0.11.0"
 rand = "0.8.5"
-criterion = { version = "0.5.1", features = ["stable"] }
+criterion = { version = "0.5.1", features = ["stable", "async_tokio"] }
 tokio = { version = "1", features = ["full"] }
 tokio-scoped = "0.2.0"
+async-trait = "0.1.73"
 
 
 #for benchmarks
@@ -40,5 +41,13 @@ name = "mutex"
 harness = false
 
 [[bench]]
+name = "async_mutex"
+harness = false
+
+[[bench]]
 name = "mutex_worst_latency"
 harness = false
+
+
+[profile.bench]
+lto = true

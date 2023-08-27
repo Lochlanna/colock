@@ -98,6 +98,10 @@ impl EventListener<'_> {
         self.is_on_queue
     }
 
+    pub(crate) fn set_off_queue(&mut self) {
+        self.is_on_queue = false;
+    }
+
     /// Returns true if the cancellation was successful (had not been woken up)
     pub fn cancel(&mut self) -> bool {
         if !self.is_on_queue {

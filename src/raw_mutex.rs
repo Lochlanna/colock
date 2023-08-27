@@ -248,9 +248,18 @@ where
     type Output = G;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let taken_lock = |this: &mut Self| {
+            this.did_take_lock.set(true);
+            if let Some(listener) = this.listener.as_mut() {
+                listener.set_off_queue();
+            }
+            Poll::Ready((this.guard_builder)())
+        };
+
+        let this = unsafe { self.get_unchecked_mut() };
         let mut state = 0;
         while state & LOCKED_BIT == 0 {
-            if let Err(new_state) = self.mutex.state.compare_exchange_weak(
+            if let Err(new_state) = this.mutex.state.compare_exchange_weak(
                 state,
                 state | LOCKED_BIT,
                 Ordering::Acquire,
@@ -258,18 +267,16 @@ where
             ) {
                 state = new_state;
             } else {
-                self.did_take_lock.set(true);
-                return Poll::Ready((self.guard_builder)());
+                return taken_lock(this);
             }
         }
-        let this = unsafe { self.get_unchecked_mut() };
+
         let listener = this
             .listener
             .insert(this.mutex.event.new_async_listener(cx.waker().clone()));
         if !listener.register_if(this.mutex.conditional_register()) {
             //register will fail if it gets the lock!
-            this.did_take_lock.set(true);
-            return Poll::Ready((this.guard_builder)());
+            return taken_lock(this);
         }
 
         Poll::Pending
