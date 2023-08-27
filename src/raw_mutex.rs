@@ -13,14 +13,14 @@ const FAIR_BIT: u8 = 4;
 
 #[derive(Debug)]
 pub struct RawMutex {
-    event: Event,
+    queue: Event,
     state: AtomicU8,
 }
 
 impl RawMutex {
     pub const fn new() -> Self {
         Self {
-            event: Event::new(),
+            queue: Event::new(),
             state: AtomicU8::new(0),
         }
     }
@@ -71,7 +71,7 @@ impl RawMutex {
                     0 => (LOCKED_BIT, Ordering::Acquire),
                     LOCKED_BIT => (LOCKED_BIT | WAIT_BIT, Ordering::Relaxed),
                     WAIT_BIT => (LOCKED_BIT | WAIT_BIT, Ordering::Acquire),
-                    _ => return true,
+                    _ => panic!("unknown state in conditional register!"),
                 };
                 match self
                     .state
@@ -113,7 +113,7 @@ impl RawMutex {
     }
 
     fn lock_slow(&self, timeout: Option<Instant>) -> bool {
-        let mut listener = self.event.new_listener();
+        let mut listener = self.queue.new_listener();
 
         let mut state = self.state.load(Ordering::Relaxed);
         if state & LOCKED_BIT == 0
@@ -194,7 +194,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
             return;
         }
 
-        self.event.notify_if(self.conditional_notify(), || {});
+        self.queue.notify_if(self.conditional_notify(), || {});
     }
 
     fn is_locked(&self) -> bool {
@@ -212,7 +212,7 @@ unsafe impl lock_api::RawMutexFair for RawMutex {
         {
             return;
         }
-        self.event.notify_if(
+        self.queue.notify_if(
             |num_waiters_left| {
                 if num_waiters_left == 1 {
                     self.state.store(FAIR_BIT | LOCKED_BIT, Ordering::Relaxed);
@@ -279,7 +279,7 @@ impl<F> Drop for RawMutexPoller<'_, F> {
                 // The waker was triggered but we never woke up to take the lock
                 if self.mutex.state.load(Ordering::Relaxed) & LOCKED_BIT == 0 {
                     self.mutex
-                        .event
+                        .queue
                         .notify_if(self.mutex.conditional_notify(), || {});
                 }
             }
@@ -320,7 +320,7 @@ where
 
         let listener = this
             .listener
-            .get_or_insert_with(|| this.mutex.event.new_async_listener(cx.waker().clone()));
+            .get_or_insert_with(|| this.mutex.queue.new_async_listener(cx.waker().clone()));
         if !listener.register_if(this.mutex.conditional_register()) {
             //register will fail if it gets the lock!
             return taken_lock(this);
