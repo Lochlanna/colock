@@ -5,10 +5,9 @@ mod intrusive_list;
 mod maybe_ref;
 mod parker;
 
-use crate::intrusive_list::{IntrusiveLinkedList, ListToken, Node};
-use crate::parker::State;
 use core::task::Waker;
-use parker::Parker;
+use intrusive_list::{IntrusiveLinkedList, ListToken, Node};
+use parker::{Parker, State};
 
 #[derive(Debug)]
 pub struct Event {

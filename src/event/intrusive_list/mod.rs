@@ -1,4 +1,4 @@
-use crate::maybe_ref::MaybeRef;
+use crate::event::maybe_ref::MaybeRef;
 use core::cell::Cell;
 use core::fmt::{Debug, Formatter};
 

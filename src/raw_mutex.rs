@@ -1,10 +1,10 @@
+use crate::event::{Event, EventListener};
 use crate::spinwait;
 use core::cell::Cell;
 use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU8, Ordering};
 use core::task::{Context, Poll};
-use event_zero::{Event, EventListener};
 const LOCKED_BIT: u8 = 1;
 const WAIT_BIT: u8 = 2;
 const FAIR_BIT: u8 = 4;

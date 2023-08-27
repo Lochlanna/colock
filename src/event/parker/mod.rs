@@ -1,6 +1,6 @@
 mod thread_parker;
 
-use crate::parker::thread_parker::ThreadParkerT;
+use crate::event::parker::thread_parker::ThreadParkerT;
 use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicU8, Ordering};
 
