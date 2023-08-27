@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-mod const_atomic_ptr;
 mod intrusive_list;
 mod maybe_ref;
 mod parker;
