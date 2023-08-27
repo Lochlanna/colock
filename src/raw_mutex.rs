@@ -22,7 +22,7 @@ impl RawMutex {
             state: AtomicU8::new(0),
         }
     }
-    #[inline(always)]
+    #[inline]
     fn try_lock_once(&self, state: &mut u8) -> bool {
         while *state & LOCKED_BIT == 0 {
             if let Err(new_state) = self.state.compare_exchange_weak(
@@ -39,6 +39,7 @@ impl RawMutex {
         false
     }
 
+    #[inline]
     fn try_lock_spin(&self, state: &mut u8) -> bool {
         let mut spin_wait = spinwait::SpinWait::new();
         while spin_wait.spin() {
@@ -108,27 +109,11 @@ impl RawMutex {
     {
         RawMutexPoller::new(self, guard_builder)
     }
-}
 
-unsafe impl lock_api::RawMutex for RawMutex {
-    #[allow(clippy::declare_interior_mutable_const)]
-    const INIT: Self = Self::new();
-    type GuardMarker = lock_api::GuardSend;
-
-    fn lock(&self) {
-        let Err(mut state) =
-            self.state
-                .compare_exchange_weak(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
-        else {
-            return;
-        };
-        if self.try_lock_spin(&mut state) {
-            return;
-        }
-
+    fn lock_slow(&self) {
         let mut listener = self.event.new_listener();
 
-        state = self.state.load(Ordering::Relaxed);
+        let mut state = self.state.load(Ordering::Relaxed);
         if state & LOCKED_BIT == 0
             && self
                 .state
@@ -155,7 +140,29 @@ unsafe impl lock_api::RawMutex for RawMutex {
             }
         }
     }
+}
 
+unsafe impl lock_api::RawMutex for RawMutex {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const INIT: Self = Self::new();
+    type GuardMarker = lock_api::GuardSend;
+
+    #[inline]
+    fn lock(&self) {
+        let Err(mut state) =
+            self.state
+                .compare_exchange_weak(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
+        else {
+            return;
+        };
+        if self.try_lock_spin(&mut state) {
+            return;
+        }
+
+        self.lock_slow()
+    }
+
+    #[inline]
     fn try_lock(&self) -> bool {
         let Err(mut state) =
             self.state
@@ -166,6 +173,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
         self.try_lock_once(&mut state)
     }
 
+    #[inline]
     unsafe fn unlock(&self) {
         let state = self.state.fetch_and(!LOCKED_BIT, Ordering::Release);
         if state & WAIT_BIT == 0 {
@@ -181,6 +189,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
 }
 
 unsafe impl lock_api::RawMutexFair for RawMutex {
+    #[inline]
     unsafe fn unlock_fair(&self) {
         if self
             .state

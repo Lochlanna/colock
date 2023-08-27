@@ -18,15 +18,18 @@ impl<T> Mutex<T> {
         }
     }
 
+    #[inline]
     pub fn lock(&self) -> MutexGuard<'_, T> {
         self.raw.lock();
         MutexGuard { mutex: self }
     }
 
+    #[inline]
     pub fn lock_async<'a>(&'a self) -> RawMutexPoller<'_, impl Fn() -> MutexGuard<'a, T>> {
         self.raw.lock_async(|| MutexGuard { mutex: self })
     }
 
+    #[inline]
     pub fn is_locked(&self) -> bool {
         self.raw.is_locked()
     }
@@ -47,12 +50,14 @@ impl<T> Drop for MutexGuard<'_, T> {
 impl<T> Deref for MutexGuard<'_, T> {
     type Target = T;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         unsafe { &*self.mutex.data.get() }
     }
 }
 
 impl<T> DerefMut for MutexGuard<'_, T> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut *self.mutex.data.get() }
     }
