@@ -3,12 +3,12 @@ use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use lock_api::{RawMutex as RawMutexAPI, RawMutexTimed};
 
-pub struct Mutex<T> {
+pub struct Mutex<T: ?Sized> {
     raw: RawMutex,
     data: UnsafeCell<T>,
 }
 
-unsafe impl<T> Sync for Mutex<T> {}
+unsafe impl<T> Sync for Mutex<T> where T: ?Sized {}
 
 impl<T> Mutex<T> {
     pub const fn new(data: T) -> Self {
@@ -18,6 +18,15 @@ impl<T> Mutex<T> {
         }
     }
 
+    #[inline]
+    pub fn is_locked(&self) -> bool {
+        self.raw.is_locked()
+    }
+}
+impl<T> Mutex<T>
+where
+    T: ?Sized,
+{
     #[inline]
     pub fn lock(&self) -> MutexGuard<'_, T> {
         self.raw.lock();
@@ -44,18 +53,16 @@ impl<T> Mutex<T> {
             None
         }
     }
-
-    #[inline]
-    pub fn is_locked(&self) -> bool {
-        self.raw.is_locked()
-    }
 }
 
-pub struct MutexGuard<'a, T> {
+pub struct MutexGuard<'a, T: ?Sized> {
     mutex: &'a Mutex<T>,
 }
 
-impl<T> Drop for MutexGuard<'_, T> {
+impl<T> Drop for MutexGuard<'_, T>
+where
+    T: ?Sized,
+{
     fn drop(&mut self) {
         unsafe {
             self.mutex.raw.unlock();
@@ -63,7 +70,10 @@ impl<T> Drop for MutexGuard<'_, T> {
     }
 }
 
-impl<T> Deref for MutexGuard<'_, T> {
+impl<T> Deref for MutexGuard<'_, T>
+where
+    T: ?Sized,
+{
     type Target = T;
 
     #[inline]
@@ -72,7 +82,10 @@ impl<T> Deref for MutexGuard<'_, T> {
     }
 }
 
-impl<T> DerefMut for MutexGuard<'_, T> {
+impl<T> DerefMut for MutexGuard<'_, T>
+where
+    T: ?Sized,
+{
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut *self.mutex.data.get() }
@@ -203,5 +216,17 @@ mod tests {
         // const J: u64 = 50000000;
         const K: u64 = 6;
         do_lots_and_lots_async(J, K).await;
+    }
+
+    #[test]
+    fn test_mutex_unsized() {
+        let mutex: &Mutex<[i32]> = &Mutex::new([1, 2, 3]);
+        {
+            let b = &mut *mutex.lock();
+            b[0] = 4;
+            b[2] = 5;
+        }
+        let comp: &[i32] = &[4, 2, 5];
+        assert_eq!(&*mutex.lock(), comp);
     }
 }
