@@ -9,6 +9,7 @@ use std::time::Instant;
 
 const LOCKED_BIT: u8 = 1;
 const WAIT_BIT: u8 = 2;
+const LOCKED_AND_WAITING: u8 = 3;
 const FAIR_BIT: u8 = 4;
 
 #[derive(Debug)]
@@ -71,7 +72,10 @@ impl RawMutex {
                     0 => (LOCKED_BIT, Ordering::Acquire),
                     LOCKED_BIT => (LOCKED_BIT | WAIT_BIT, Ordering::Relaxed),
                     WAIT_BIT => (LOCKED_BIT | WAIT_BIT, Ordering::Acquire),
-                    _ => panic!("unknown state in conditional register!"),
+                    _ => {
+                        // locked and waiting / fair unlock
+                        return true;
+                    }
                 };
                 match self
                     .state
