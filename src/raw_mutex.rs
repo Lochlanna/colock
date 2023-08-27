@@ -273,7 +273,7 @@ where
 
         let listener = this
             .listener
-            .insert(this.mutex.event.new_async_listener(cx.waker().clone()));
+            .get_or_insert_with(|| this.mutex.event.new_async_listener(cx.waker().clone()));
         if !listener.register_if(this.mutex.conditional_register()) {
             //register will fail if it gets the lock!
             return taken_lock(this);
