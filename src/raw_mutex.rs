@@ -5,6 +5,8 @@ use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU8, Ordering};
 use core::task::{Context, Poll};
+use std::time::Instant;
+
 const LOCKED_BIT: u8 = 1;
 const WAIT_BIT: u8 = 2;
 const FAIR_BIT: u8 = 4;
@@ -110,7 +112,7 @@ impl RawMutex {
         RawMutexPoller::new(self, guard_builder)
     }
 
-    fn lock_slow(&self) {
+    fn lock_slow(&self, timeout: Option<Instant>) -> bool {
         let mut listener = self.event.new_listener();
 
         let mut state = self.state.load(Ordering::Relaxed);
@@ -125,20 +127,32 @@ impl RawMutex {
                 )
                 .is_ok()
         {
-            return;
+            return true;
         }
-
+        if let Some(timeout) = timeout {
+            if timeout <= Instant::now() {
+                return false;
+            }
+        }
         while listener.register_if(self.conditional_register()) {
-            listener.wait();
+            if let Some(timeout) = timeout {
+                if !listener.wait_until(timeout) {
+                    // we timed out!
+                    return false;
+                }
+            } else {
+                listener.wait();
+            }
             state = self.state.load(Ordering::Relaxed);
             if state & FAIR_BIT != 0 {
                 self.state.fetch_and(!FAIR_BIT, Ordering::Relaxed);
-                return;
+                return true;
             }
             if self.try_lock_spin(&mut state) {
-                return;
+                return true;
             }
         }
+        true
     }
 }
 
@@ -159,7 +173,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
             return;
         }
 
-        self.lock_slow()
+        self.lock_slow(None);
     }
 
     #[inline]
@@ -213,6 +227,30 @@ unsafe impl lock_api::RawMutexFair for RawMutex {
                 self.state.store(0, Ordering::Release);
             },
         );
+    }
+}
+
+unsafe impl lock_api::RawMutexTimed for RawMutex {
+    type Duration = core::time::Duration;
+    type Instant = std::time::Instant;
+
+    fn try_lock_for(&self, timeout: Self::Duration) -> bool {
+        let timeout = std::time::Instant::now() + timeout;
+        self.try_lock_until(timeout)
+    }
+
+    fn try_lock_until(&self, timeout: Self::Instant) -> bool {
+        let Err(mut state) =
+            self.state
+                .compare_exchange_weak(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
+        else {
+            return true;
+        };
+        if self.try_lock_spin(&mut state) {
+            return true;
+        }
+
+        self.lock_slow(Some(timeout))
     }
 }
 
@@ -295,7 +333,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lock_api::RawMutex as RawMutexApi;
+    use lock_api::{RawMutex as RawMutexApi, RawMutexTimed};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -330,6 +368,16 @@ mod tests {
             }
         });
         assert!(!mutex.is_locked());
+    }
+
+    #[test]
+    fn timeout() {
+        let mutex = RawMutex::new();
+        mutex.lock();
+        let start = Instant::now();
+        mutex.try_lock_until(Instant::now() + Duration::from_millis(25));
+        let elapsed = start.elapsed().as_millis();
+        assert!(elapsed >= 25);
     }
 
     #[cfg_attr(miri, ignore)]

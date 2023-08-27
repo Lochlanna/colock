@@ -48,17 +48,18 @@ impl Event {
         self.notify_if(|_| true, || {})
     }
     pub fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn()) -> bool {
-        if let Some(unpark_handle) = self.inner.pop_if(
+        while let Some(unpark_handle) = self.inner.pop_if(
             |parker, num_left| {
                 if !condition(num_left) {
                     return None;
                 }
                 Some(parker.unpark_handle())
             },
-            on_empty,
+            &on_empty,
         ) {
-            unpark_handle.un_park();
-            return true;
+            if unpark_handle.un_park() {
+                return true;
+            }
         }
         false
     }
@@ -93,6 +94,16 @@ impl EventListener<'_> {
     pub fn wait(&mut self) {
         self.list_token.inner().park();
         self.is_on_queue = false;
+    }
+
+    /// Returns true if the timeout was not reached (it was woken up!)
+    pub fn wait_until(&mut self, timeout: std::time::Instant) -> bool {
+        let result = self.list_token.inner().park_until(timeout);
+        if !result {
+            self.cancel();
+        }
+        self.is_on_queue = false;
+        result
     }
     pub fn is_on_queue(&self) -> bool {
         self.is_on_queue

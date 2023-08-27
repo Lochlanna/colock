@@ -72,6 +72,24 @@ impl Parker {
         }
     }
 
+    pub fn park_until(&self, timeout: std::time::Instant) -> bool {
+        match &self.inner {
+            ParkInner::ThreadParker(thread) => {
+                while self.should_park.load(Ordering::Acquire) == State::Waiting as u8 {
+                    if !unsafe { thread.park_until(timeout) } {
+                        return false;
+                    }
+                }
+            }
+            ParkInner::Waker(_) => {}
+        }
+
+        while self.should_park.load(Ordering::Acquire) == State::Notifying as u8 {
+            core::hint::spin_loop()
+        }
+        true
+    }
+
     pub fn unpark_handle(&self) -> UnparkHandle {
         UnparkHandle { inner: self }
     }
