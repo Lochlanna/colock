@@ -5,11 +5,9 @@ mod intrusive_list;
 mod maybe_ref;
 mod parker;
 
-use crate::intrusive_list::intrusive_linked_list::{ListToken, Node};
+use crate::intrusive_list::{IntrusiveLinkedList, ListToken, Node};
 use crate::parker::State;
 use core::task::Waker;
-use intrusive_list::intrusive_linked_list::IntrusiveLinkedList;
-use intrusive_list::{IntrusiveList, IntrusiveToken};
 use parker::Parker;
 
 #[derive(Debug)]
@@ -20,7 +18,7 @@ pub struct Event {
 impl Event {
     pub const fn new() -> Self {
         Self {
-            inner: IntrusiveLinkedList::NEW,
+            inner: IntrusiveLinkedList::new(),
         }
     }
 
