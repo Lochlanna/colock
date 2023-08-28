@@ -42,7 +42,7 @@ where
     }
 
     #[inline]
-    pub fn lock_async<'a>(&'a self) -> RawMutexPoller<'_, impl Fn() -> MutexGuard<'a, T>> {
+    pub fn lock_async<'a>(&'a self) -> Poller<'_, impl Fn() -> MutexGuard<'a, T>> {
         self.raw.lock_async(|| MutexGuard { mutex: self })
     }
 

@@ -7,6 +7,8 @@ mod parker;
 use core::task::Waker;
 use intrusive_list::{IntrusiveLinkedList, ListToken, Node};
 use parker::{Parker, State};
+use std::cell::Cell;
+use std::pin::Pin;
 
 #[derive(Debug)]
 pub struct Event {
@@ -29,7 +31,7 @@ impl Event {
             EventListener {
                 event: self,
                 list_token: self.inner.build_token(node),
-                is_on_queue: false,
+                is_on_queue: Cell::new(false),
             }
         })
     }
@@ -39,7 +41,7 @@ impl Event {
         EventListener {
             event: self,
             list_token: self.inner.build_token(node),
-            is_on_queue: false,
+            is_on_queue: Cell::new(false),
         }
     }
 
@@ -67,7 +69,7 @@ impl Event {
 pub struct EventListener<'a> {
     event: &'a Event,
     list_token: ListToken<'a, Parker>,
-    is_on_queue: bool,
+    is_on_queue: Cell<bool>,
 }
 
 impl Drop for EventListener<'_> {
@@ -77,47 +79,50 @@ impl Drop for EventListener<'_> {
 }
 
 impl EventListener<'_> {
-    pub fn register_if(&mut self, condition: impl FnOnce() -> bool) -> bool {
-        debug_assert!(!self.is_on_queue || self.list_token.inner().get_state() == State::Notified);
+    pub fn register_if(self: Pin<&Self>, condition: impl FnOnce() -> bool) -> bool {
+        debug_assert!(
+            !self.is_on_queue.get() || self.list_token.inner().get_state() == State::Notified
+        );
         self.list_token.inner().prepare_park();
-        let did_push = self.list_token.push_if(condition);
+        let pinned_token = unsafe { Pin::new_unchecked(&self.list_token) };
+        let did_push = pinned_token.push_if(condition);
         if did_push {
-            self.is_on_queue = true;
+            self.is_on_queue.set(true);
         }
         did_push
     }
 
-    pub fn register(&mut self) {
+    pub fn register(self: Pin<&Self>) {
         self.register_if(|| true);
     }
-    pub fn wait(&mut self) {
+    pub fn wait(self: Pin<&Self>) {
         self.list_token.inner().park();
-        self.is_on_queue = false;
+        self.is_on_queue.set(false);
     }
 
     /// Returns true if the timeout was not reached (it was woken up!)
-    pub fn wait_until(&mut self, timeout: std::time::Instant) -> bool {
+    pub fn wait_until(self: Pin<&Self>, timeout: std::time::Instant) -> bool {
         let result = self.list_token.inner().park_until(timeout);
         if !result {
             self.cancel();
         }
-        self.is_on_queue = false;
+        self.is_on_queue.set(false);
         result
     }
     pub fn is_on_queue(&self) -> bool {
-        self.is_on_queue
+        self.is_on_queue.get()
     }
 
     pub(crate) fn set_off_queue(&mut self) {
-        self.is_on_queue = false;
+        self.is_on_queue.set(false);
     }
 
     /// Returns true if the cancellation was successful (had not been woken up)
-    pub fn cancel(&mut self) -> bool {
-        if !self.is_on_queue {
+    pub fn cancel(&self) -> bool {
+        if !self.is_on_queue.get() {
             return true;
         }
-        self.is_on_queue = false;
+        self.is_on_queue.set(false);
         if self.list_token.revoke() {
             return true;
         }
@@ -132,6 +137,7 @@ impl EventListener<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::pin::pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Duration;
@@ -148,11 +154,12 @@ mod tests {
                 debug_assert!(event.notify_one());
                 barrier.wait();
             });
-            let mut listen_guard = event.new_listener();
-            listen_guard.register();
+            let listen_guard = pin!(event.new_listener());
+
+            listen_guard.as_ref().register();
             barrier.wait();
             assert!(!test_val.load(Ordering::SeqCst));
-            listen_guard.wait();
+            listen_guard.as_ref().wait();
             assert!(test_val.load(Ordering::SeqCst));
             barrier.wait();
         });
@@ -164,10 +171,11 @@ mod tests {
         let barrier = std::sync::Barrier::new(2);
         thread::scope(|s| {
             s.spawn(|| {
-                let mut listen_guard = event.new_listener();
-                listen_guard.register();
-                barrier.wait();
-                drop(listen_guard);
+                {
+                    let listen_guard = pin!(event.new_listener());
+                    listen_guard.as_ref().register();
+                    barrier.wait();
+                }
                 barrier.wait();
             });
             barrier.wait();
@@ -183,8 +191,8 @@ mod tests {
         let barrier = std::sync::Barrier::new(2);
         thread::scope(|s| {
             s.spawn(|| {
-                let mut listen_guard = event.new_listener();
-                listen_guard.register();
+                let listen_guard = pin!(event.new_listener());
+                listen_guard.as_ref().register();
                 barrier.wait();
                 barrier.wait();
                 drop(listen_guard);

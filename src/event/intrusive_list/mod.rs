@@ -1,6 +1,7 @@
 use crate::event::maybe_ref::MaybeRef;
 use core::cell::Cell;
 use core::fmt::{Debug, Formatter};
+use core::pin::{pin, Pin};
 
 /// Outer container for intrusive linked list. Proxies calls to the inner list
 /// through the spin lock
@@ -169,7 +170,6 @@ where
 /// An intrusive linked list node.
 /// This node should be embedded within another struct and pinned before it is pushed to the list
 /// If it moves while on the list it will invalidate the list!
-#[repr(align(2))]
 #[derive(Debug)]
 pub struct Node<T> {
     next: Cell<*const Node<T>>,
@@ -284,12 +284,12 @@ impl<T> Drop for ListToken<'_, T> {
 
 impl<T> ListToken<'_, T> {
     /// Push the node onto the front of the queue.
-    pub fn push(&self) {
+    pub fn push(self: Pin<&Self>) {
         self.push_if(|| true);
     }
 
     /// Conditionally push the node onto the front of the queue.
-    pub fn push_if(&self, condition: impl FnOnce() -> bool) -> bool {
+    pub fn push_if(self: Pin<&Self>, condition: impl FnOnce() -> bool) -> bool {
         let mut queue = self.queue.inner.lock();
         self.node.push_if(&mut queue, condition)
     }
@@ -315,6 +315,7 @@ mod tests {
     use itertools::Itertools;
     use std::collections::HashMap;
     use std::ops::Div;
+    use std::pin::pin;
     use std::thread;
 
     trait PtrHelpers {
@@ -344,12 +345,12 @@ mod tests {
     #[test]
     fn basic_push() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = queue.build_token(Node::new(32));
-        node_a.push();
-        let node_b = queue.build_token(Node::new(42));
-        node_b.push();
-        let node_c = queue.build_token(Node::new(21));
-        node_c.push();
+        let node_a = pin!(queue.build_token(Node::new(32)));
+        node_a.as_ref().push();
+        let node_b = pin!(queue.build_token(Node::new(42)));
+        node_b.as_ref().push();
+        let node_c = pin!(queue.build_token(Node::new(21)));
+        node_c.as_ref().push();
         let elements = queue.to_vec();
         assert_eq!(elements, vec![21, 42, 32]);
         println!("queue: {queue:?}");
@@ -358,12 +359,12 @@ mod tests {
     #[test]
     fn revoke_head() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = queue.build_token(Node::new(32));
-        node_a.push();
-        let node_b = queue.build_token(Node::new(42));
-        node_b.push();
-        let node_c = queue.build_token(Node::new(21));
-        node_c.push();
+        let node_a = pin!(queue.build_token(Node::new(32)));
+        node_a.as_ref().push();
+        let node_b = pin!(queue.build_token(Node::new(42)));
+        node_b.as_ref().push();
+        let node_c = pin!(queue.build_token(Node::new(21)));
+        node_c.as_ref().push();
         let elements = queue.to_vec();
         assert_eq!(elements, vec![21, 42, 32]);
         node_c.revoke();
@@ -383,12 +384,12 @@ mod tests {
     #[test]
     fn revoke_tail() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = queue.build_token(Node::new(32));
-        node_a.push();
-        let node_b = queue.build_token(Node::new(42));
-        node_b.push();
-        let node_c = queue.build_token(Node::new(21));
-        node_c.push();
+        let node_a = pin!(queue.build_token(Node::new(32)));
+        node_a.as_ref().push();
+        let node_b = pin!(queue.build_token(Node::new(42)));
+        node_b.as_ref().push();
+        let node_c = pin!(queue.build_token(Node::new(21)));
+        node_c.as_ref().push();
         let elements = queue.to_vec();
         assert_eq!(elements, vec![21, 42, 32]);
         node_a.revoke();
@@ -408,12 +409,12 @@ mod tests {
     #[test]
     fn revoke_middle() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = queue.build_token(Node::new(32));
-        node_a.push();
-        let node_b = queue.build_token(Node::new(42));
-        node_b.push();
-        let node_c = queue.build_token(Node::new(21));
-        node_c.push();
+        let node_a = pin!(queue.build_token(Node::new(32)));
+        node_a.as_ref().push();
+        let node_b = pin!(queue.build_token(Node::new(42)));
+        node_b.as_ref().push();
+        let node_c = pin!(queue.build_token(Node::new(21)));
+        node_c.as_ref().push();
         let elements = queue.to_vec();
 
         assert_eq!(elements, vec![21, 42, 32]);
@@ -434,27 +435,28 @@ mod tests {
     #[test]
     fn drop_test() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = queue.build_token(Box::new(Node::new(32)));
-        node_a.push();
-        let node_b = queue.build_token(Box::new(Node::new(42)));
-        node_b.push();
-        let node_c = queue.build_token(Box::new(Node::new(21)));
-        node_c.push();
+        let node_a = pin!(queue.build_token(Box::new(Node::new(32))));
+        node_a.as_ref().push();
+        let node_c = pin!(queue.build_token(Box::new(Node::new(21))));
+        {
+            let node_b = pin!(queue.build_token(Box::new(Node::new(42))));
+            node_b.as_ref().push();
+            node_c.as_ref().push();
 
-        assert_eq!(queue.to_vec(), vec![21, 42, 32]);
-        drop(node_b);
+            assert_eq!(queue.to_vec(), vec![21, 42, 32]);
+        }
         assert_eq!(queue.to_vec(), vec![21, 32]);
     }
 
     #[test]
     fn pop() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = queue.build_token(Node::new(32));
-        node_a.push();
-        let node_b = queue.build_token(Node::new(42));
-        node_b.push();
-        let node_c = queue.build_token(Node::new(21));
-        node_c.push();
+        let node_a = pin!(queue.build_token(Node::new(32)));
+        node_a.as_ref().push();
+        let node_b = pin!(queue.build_token(Node::new(42)));
+        node_b.as_ref().push();
+        let node_c = pin!(queue.build_token(Node::new(21)));
+        node_c.as_ref().push();
         assert_eq!(queue.to_vec(), vec![21, 42, 32]);
 
         queue.pop_if(
@@ -525,8 +527,8 @@ mod tests {
                     let mut tokens = Vec::with_capacity(num_elements);
                     barrier.wait();
                     for i in 0..num_elements {
-                        let token = Box::new(queue.build_token(Node::new(i)));
-                        token.push();
+                        let token = Box::pin(queue.build_token(Node::new(i)));
+                        token.as_ref().push();
                         tokens.push(token);
                     }
                     barrier.wait();

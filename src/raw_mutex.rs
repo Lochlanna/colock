@@ -5,6 +5,7 @@ use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU8, Ordering};
 use core::task::{Context, Poll};
+use std::pin::pin;
 use std::time::Instant;
 
 const LOCKED_BIT: u8 = 1;
@@ -109,15 +110,15 @@ impl RawMutex {
         }
     }
 
-    pub const fn lock_async<F, G>(&self, guard_builder: F) -> RawMutexPoller<'_, F>
+    pub const fn lock_async<F, G>(&self, guard_builder: F) -> Poller<'_, F>
     where
         F: Fn() -> G,
     {
-        RawMutexPoller::new(self, guard_builder)
+        Poller::new(self, guard_builder)
     }
 
     fn lock_slow(&self, timeout: Option<Instant>) -> bool {
-        let mut listener = self.queue.new_listener();
+        let listener = pin!(self.queue.new_listener());
 
         let mut state = self.state.load(Ordering::Relaxed);
         if state & LOCKED_BIT == 0
@@ -138,14 +139,14 @@ impl RawMutex {
                 return false;
             }
         }
-        while listener.register_if(self.conditional_register()) {
+        while listener.as_ref().register_if(self.conditional_register()) {
             if let Some(timeout) = timeout {
-                if !listener.wait_until(timeout) {
+                if !listener.as_ref().wait_until(timeout) {
                     // we timed out!
                     return false;
                 }
             } else {
-                listener.wait();
+                listener.as_ref().wait();
             }
             state = self.state.load(Ordering::Relaxed);
             if state & FAIR_BIT != 0 {
@@ -258,14 +259,14 @@ unsafe impl lock_api::RawMutexTimed for RawMutex {
     }
 }
 
-pub struct RawMutexPoller<'a, F> {
+pub struct Poller<'a, F> {
     mutex: &'a RawMutex,
     listener: Option<EventListener<'a>>,
     did_take_lock: Cell<bool>,
     guard_builder: F,
 }
 
-impl<'a, F> RawMutexPoller<'a, F> {
+impl<'a, F> Poller<'a, F> {
     const fn new(mutex: &'a RawMutex, guard_builder: F) -> Self {
         Self {
             mutex,
@@ -276,7 +277,7 @@ impl<'a, F> RawMutexPoller<'a, F> {
     }
 }
 
-impl<F> Drop for RawMutexPoller<'_, F> {
+impl<F> Drop for Poller<'_, F> {
     fn drop(&mut self) {
         if let Some(listener) = self.listener.as_mut() {
             if !listener.cancel() && !self.did_take_lock.get() {
@@ -291,8 +292,8 @@ impl<F> Drop for RawMutexPoller<'_, F> {
     }
 }
 
-unsafe impl<F> Send for RawMutexPoller<'_, F> {}
-impl<'a, F, G> Future for RawMutexPoller<'a, F>
+unsafe impl<F> Send for Poller<'_, F> {}
+impl<'a, F, G> Future for Poller<'a, F>
 where
     F: Fn() -> G,
 {
@@ -325,6 +326,7 @@ where
         let listener = this
             .listener
             .get_or_insert_with(|| this.mutex.queue.new_async_listener(cx.waker().clone()));
+        let listener = unsafe { Pin::new_unchecked(&*listener) };
         if !listener.register_if(this.mutex.conditional_register()) {
             //register will fail if it gets the lock!
             return taken_lock(this);

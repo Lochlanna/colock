@@ -1,4 +1,5 @@
 use crate::event::Event;
+use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SHARED_LOCK: usize = 0b1;
@@ -86,10 +87,13 @@ unsafe impl lock_api::RawRwLock for RawRWLock {
             return;
         }
         // we failed to grab the lock, so we need to wait
-        let mut listener = self.read_queue.new_listener();
+        let mut listener = pin!(self.read_queue.new_listener());
 
-        while listener.register_if(self.conditional_register_shared()) {
-            listener.wait();
+        while listener
+            .as_ref()
+            .register_if(self.conditional_register_shared())
+        {
+            listener.as_ref().wait();
             state = self.state.load(Ordering::Relaxed);
             if self.lock_shared_once(&mut state) {
                 return;
