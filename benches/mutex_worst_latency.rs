@@ -99,7 +99,7 @@ fn criterion_benchmark(c: &mut Criterion) {
         .map(|((a, b), c)| Run::from((a, b, c)));
     for run in runs {
         group.bench_with_input(BenchmarkId::new("colock4", run), &run, |b, run| {
-            b.iter_custom(|iters| run_benchmark::<colock::Mutex<f64>>(run, iters))
+            b.iter_custom(|iters| run_benchmark::<colock::mutex::Mutex<f64>>(run, iters))
         });
         group.bench_with_input(BenchmarkId::new("parking_lot", run), &run, |b, run| {
             b.iter_custom(|iters| run_benchmark::<parking_lot::Mutex<f64>>(run, iters))

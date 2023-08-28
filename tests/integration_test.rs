@@ -11,7 +11,7 @@ trait Mutex<T> {
         F: FnOnce(&mut T) -> R;
 }
 
-impl<T> Mutex<T> for colock::Mutex<T> {
+impl<T> Mutex<T> for colock::mutex::Mutex<T> {
     fn new(v: T) -> Self {
         Self::new(v)
     }
@@ -92,7 +92,7 @@ fn run_benchmark<M: Mutex<f64> + Send + Sync>(run: &Run, num_iters: u64) -> Dura
 #[ignore]
 fn run_bench() {
     for i in 0..15 {
-        run_benchmark::<colock::Mutex<f64>>(&Run::from((2, 1, 1)), 618222);
+        run_benchmark::<colock::mutex::Mutex<f64>>(&Run::from((2, 1, 1)), 618222);
         println!("done {}", i);
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
     }

@@ -113,7 +113,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     for run in runs {
         group.bench_with_input(BenchmarkId::new("colock4", run), &run, |b, run| {
             b.to_async(&tokio_runtime)
-                .iter_custom(|iters| run_benchmark::<colock::Mutex<f64>>(*run, iters))
+                .iter_custom(|iters| run_benchmark::<colock::mutex::Mutex<f64>>(*run, iters))
         });
         group.bench_with_input(BenchmarkId::new("tokio", run), &run, |b, run| {
             b.to_async(&tokio_runtime)

@@ -40,7 +40,7 @@ where
 }
 
 #[async_trait]
-impl<T> Mutex<T> for colock::Mutex<T> {
+impl<T> Mutex<T> for colock::mutex::Mutex<T> {
     fn new(v: T) -> Self {
         Self::new(v)
     }

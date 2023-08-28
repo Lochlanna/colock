@@ -19,7 +19,7 @@ pub trait Mutex<T>: Sync {
 }
 
 #[async_trait]
-impl<T> Mutex<T> for colock::Mutex<T> {
+impl<T> Mutex<T> for colock::mutex::Mutex<T> {
     fn new(v: T) -> Self {
         Self::new(v)
     }
@@ -124,7 +124,7 @@ async fn run_benchmark<M: Mutex<f64> + Send + Sync + 'static>(
 #[ignore]
 async fn run_bench() {
     for i in 0..1 {
-        run_benchmark::<colock::Mutex<f64>>(Run::from((2, 1, 1)), 618222).await;
+        run_benchmark::<colock::mutex::Mutex<f64>>(Run::from((2, 1, 1)), 618222).await;
         println!("done {}", i);
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
     }

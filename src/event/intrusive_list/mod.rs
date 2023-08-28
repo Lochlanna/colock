@@ -2,14 +2,14 @@ use crate::event::maybe_ref::MaybeRef;
 use core::cell::Cell;
 use core::fmt::{Debug, Formatter};
 
+/// Outer container for intrusive linked list. Proxies calls to the inner list
+/// through the spin lock
 #[derive(Debug)]
 pub struct IntrusiveLinkedList<T> {
     inner: spin::Mutex<IntrusiveLinkedListInner<T>>,
 }
 
 unsafe impl<T> Sync for IntrusiveLinkedList<T> {}
-unsafe impl<T> Send for IntrusiveLinkedList<T> {}
-
 impl<T> IntrusiveLinkedList<T> {
     pub const fn new() -> Self {
         Self {
@@ -17,6 +17,12 @@ impl<T> IntrusiveLinkedList<T> {
         }
     }
 
+    /// Pops the tail from the list if the condition is true
+    ///
+    /// This function proxies to the inner list via a spin lock making it safe to call from
+    /// multiple threads.
+    ///
+    /// Refer to [`IntrusiveLinkedListInner::pop_if`] for more information.
     pub fn pop_if<R>(
         &self,
         condition: impl FnOnce(&T, usize) -> Option<R>,
@@ -26,10 +32,14 @@ impl<T> IntrusiveLinkedList<T> {
         inner.pop_if(condition, on_empty)
     }
 
-    pub fn build_node(data: T) -> Node<T> {
+    /// Create a new node object.
+    ///
+    /// Node that this does not push the node onto the list.
+    pub const fn build_node(data: T) -> Node<T> {
         Node::new(data)
     }
 
+    /// Build a token that references this list
     pub fn build_token<'a>(&'a self, node: impl Into<MaybeRef<'a, Node<T>>>) -> ListToken<'a, T>
     where
         T: 'a,
@@ -50,15 +60,19 @@ where
         self.inner.lock().to_vec()
     }
 
-    pub fn pop_clone(&self) -> Option<T> {
+    /// helper function that pops the tail and clones it
+    fn pop_clone(&self) -> Option<T> {
         self.inner.lock().pop_if(|v, _| Some(v.clone()), || {})
     }
 }
+
 struct IntrusiveLinkedListInner<T> {
     head: *const Node<T>,
     tail: *const Node<T>,
     length: usize,
 }
+
+unsafe impl<T> Send for IntrusiveLinkedListInner<T> {}
 
 impl<T> IntrusiveLinkedListInner<T> {
     const fn new() -> Self {
@@ -69,6 +83,12 @@ impl<T> IntrusiveLinkedListInner<T> {
         }
     }
 
+    /// Pops the tail from the list if the condition is true
+    /// note that this function does return the value that was popped.
+    /// It does however return a value from the condition check.
+    /// This condition check is where the popped value can be used.
+    /// If the popped value needs to be recovered from the list it should be cloned and
+    /// returned from the condition check.
     fn pop_if<R>(
         &mut self,
         condition: impl FnOnce(&T, usize) -> Option<R>,
@@ -96,6 +116,8 @@ impl<T> IntrusiveLinkedListInner<T>
 where
     T: Clone,
 {
+    /// helper function that clones the items from the list into a vector.
+    /// Items are cloned from the head first.
     fn to_vec(&self) -> Vec<T> {
         let mut data = Vec::new();
         if self.head.is_null() {
@@ -105,16 +127,19 @@ where
         while !current.is_null() {
             let current_ref = unsafe { &*current };
             data.push(current_ref.data.clone());
-            current = current_ref.next.get()
+            current = current_ref.next.get();
         }
         data
     }
 }
 
+#[allow(clippy::missing_fields_in_debug)]
 impl<T> Debug for IntrusiveLinkedListInner<T>
 where
     T: Debug,
 {
+    /// An unconventional debug implementation but it's much more useful for debugging
+    /// than simply printing the pointer values
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if self.head.is_null() {
             return f.debug_struct("IntrusiveLinkedList").finish();
@@ -133,7 +158,7 @@ where
                 .as_str(),
             );
             next_str = format!("\n\t↓ {:?}", current_ref.next.get());
-            current = current_ref.next.get()
+            current = current_ref.next.get();
         }
         output += next_str.as_str();
         output.push_str("\n]");
@@ -141,6 +166,9 @@ where
     }
 }
 
+/// An intrusive linked list node.
+/// This node should be embedded within another struct and pinned before it is pushed to the list
+/// If it moves while on the list it will invalidate the list!
 #[repr(align(2))]
 #[derive(Debug)]
 pub struct Node<T> {
@@ -159,6 +187,7 @@ impl<T> Node<T> {
         }
     }
 
+    /// helper method to unconditionally push the node to the front of the queue
     fn push(&self, queue: &mut IntrusiveLinkedListInner<T>) {
         self.push_if(queue, || true);
     }
@@ -168,15 +197,15 @@ impl<T> Node<T> {
         queue: &mut IntrusiveLinkedListInner<T>,
         condition: impl FnOnce() -> bool,
     ) -> bool {
-        let should_push = condition();
-        if !should_push {
+        if !condition() {
             debug_assert!(!self.is_on_queue.get());
-            return should_push;
+            return false;
         }
 
         self.prev.set(core::ptr::null());
         self.next.set(queue.head);
         if queue.head.is_null() {
+            // This will be the only item in the list and is therefore also the tail
             queue.tail = self;
         } else {
             let head_ref = unsafe { &*queue.head };
@@ -190,6 +219,8 @@ impl<T> Node<T> {
         true
     }
 
+    /// If the node is on the queue it will be removed and true will be returned.
+    /// If the node wasn't already on the queue false will be returned.
     fn revoke(&self, queue: &mut IntrusiveLinkedListInner<T>) -> bool {
         if !self.is_on_queue.replace(false) {
             return false;
@@ -197,6 +228,8 @@ impl<T> Node<T> {
         self.remove(queue);
         true
     }
+
+    /// Removes the node from the queue.
     fn remove(&self, queue: &mut IntrusiveLinkedListInner<T>) {
         queue.length -= 1;
 
@@ -206,19 +239,19 @@ impl<T> Node<T> {
             if let Some(next) = unsafe { next.as_ref() } {
                 next.prev.set(core::ptr::null());
             } else {
-                // and the tail!
+                // This is also the tail (only item in the list)
                 debug_assert_eq!(queue.tail, self as *const _);
                 queue.tail = core::ptr::null();
             }
             queue.head = next;
         } else if self.next.get().is_null() {
-            // this is the tail!
+            // This is the tail
             debug_assert_eq!(queue.tail, self as *const _);
             let prev = unsafe { &*self.prev.get() };
             prev.next.set(core::ptr::null());
             queue.tail = prev;
         } else {
-            // we are in the middle somewhere
+            // This is in the middle somewhere
             let prev = unsafe { &*self.prev.get() };
             let next = unsafe { &*self.next.get() };
             next.prev.set(prev);
@@ -228,10 +261,14 @@ impl<T> Node<T> {
         self.next.set(core::ptr::null());
         self.prev.set(core::ptr::null());
 
-        self.is_on_queue.set(false)
+        self.is_on_queue.set(false);
     }
 }
 
+/// A ListToken represents an interest in an entry in the list.
+/// If the list token is dropped the entry will be removed from the list.
+///
+/// Once the token has been pushed to the list it cannot be moved again. Even if it's revoked.
 #[derive(Debug)]
 pub struct ListToken<'a, T> {
     queue: &'a IntrusiveLinkedList<T>,
@@ -246,19 +283,27 @@ impl<T> Drop for ListToken<'_, T> {
 }
 
 impl<T> ListToken<'_, T> {
+    /// Push the node onto the front of the queue.
     pub fn push(&self) {
         self.push_if(|| true);
     }
+
+    /// Conditionally push the node onto the front of the queue.
     pub fn push_if(&self, condition: impl FnOnce() -> bool) -> bool {
         let mut queue = self.queue.inner.lock();
         self.node.push_if(&mut queue, condition)
     }
 
+    /// Revoke the node from the queue.
+    ///
+    /// Returns true if the node was on the queue and was revoked.
+    /// Returns false if the node was not on the queue.
     pub fn revoke(&self) -> bool {
         let mut queue = self.queue.inner.lock();
         self.node.revoke(&mut queue)
     }
 
+    /// Access the inner value of the node.
     pub fn inner(&self) -> &T {
         &self.node.data
     }
@@ -269,6 +314,7 @@ mod tests {
     use super::*;
     use itertools::Itertools;
     use std::collections::HashMap;
+    use std::ops::Div;
     use std::thread;
 
     trait PtrHelpers {
@@ -306,7 +352,7 @@ mod tests {
         node_c.push();
         let elements = queue.to_vec();
         assert_eq!(elements, vec![21, 42, 32]);
-        println!("queue: {:?}", queue);
+        println!("queue: {queue:?}");
     }
 
     #[test]
@@ -449,9 +495,8 @@ mod tests {
     }
 
     fn do_pipe_test(num_elements: usize, num_senders: usize, num_receivers: usize) {
-        let elements_per_receiver =
-            (num_senders as f64 * num_elements as f64) / num_receivers as f64;
-        let elements_per_receiver = elements_per_receiver.floor() as usize;
+        // std::ops::Div; does floor by default
+        let elements_per_receiver = (num_senders * num_elements).div(num_receivers);
 
         let barrier = std::sync::Barrier::new(num_senders + num_receivers);
         let queue = IntrusiveLinkedList::new();
@@ -485,6 +530,7 @@ mod tests {
                         tokens.push(token);
                     }
                     barrier.wait();
+                    drop(tokens);
                 });
             }
 

@@ -205,6 +205,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn lots_and_lots() {
         const J: u64 = 100000;
         // const J: u64 = 5000000;

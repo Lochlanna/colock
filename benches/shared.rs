@@ -57,7 +57,7 @@ impl<T> Mutex<T> for parking_lot::Mutex<T> {
     }
 }
 
-impl<T> Mutex<T> for colock::Mutex<T> {
+impl<T> Mutex<T> for colock::mutex::Mutex<T> {
     fn new(v: T) -> Self {
         Self::new(v)
     }
