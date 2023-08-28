@@ -64,7 +64,7 @@ impl RawMutex {
         false
     }
 
-    const fn conditional_register(&self) -> impl Fn() -> bool + '_ {
+    const fn conditional_register(&self) -> impl FnOnce() -> bool + '_ {
         || {
             let mut state = self.state.load(Ordering::Relaxed);
             loop {

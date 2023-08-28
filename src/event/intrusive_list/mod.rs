@@ -19,8 +19,8 @@ impl<T> IntrusiveLinkedList<T> {
 
     pub fn pop_if<R>(
         &self,
-        condition: impl Fn(&T, usize) -> Option<R>,
-        on_empty: impl Fn(),
+        condition: impl FnOnce(&T, usize) -> Option<R>,
+        on_empty: impl FnOnce(),
     ) -> Option<R> {
         let mut inner = self.inner.lock();
         inner.pop_if(condition, on_empty)
@@ -71,8 +71,8 @@ impl<T> IntrusiveLinkedListInner<T> {
 
     fn pop_if<R>(
         &mut self,
-        condition: impl Fn(&T, usize) -> Option<R>,
-        on_empty: impl Fn(),
+        condition: impl FnOnce(&T, usize) -> Option<R>,
+        on_empty: impl FnOnce(),
     ) -> Option<R> {
         if self.head.is_null() {
             //it's empty!
@@ -166,7 +166,7 @@ impl<T> Node<T> {
     fn push_if(
         &self,
         queue: &mut IntrusiveLinkedListInner<T>,
-        condition: impl Fn() -> bool,
+        condition: impl FnOnce() -> bool,
     ) -> bool {
         let should_push = condition();
         if !should_push {
@@ -249,7 +249,7 @@ impl<T> ListToken<'_, T> {
     pub fn push(&self) {
         self.push_if(|| true);
     }
-    pub fn push_if(&self, condition: impl Fn() -> bool) -> bool {
+    pub fn push_if(&self, condition: impl FnOnce() -> bool) -> bool {
         let mut queue = self.queue.inner.lock();
         self.node.push_if(&mut queue, condition)
     }

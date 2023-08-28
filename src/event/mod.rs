@@ -77,7 +77,7 @@ impl Drop for EventListener<'_> {
 }
 
 impl EventListener<'_> {
-    pub fn register_if(&mut self, condition: impl Fn() -> bool) -> bool {
+    pub fn register_if(&mut self, condition: impl FnOnce() -> bool) -> bool {
         debug_assert!(!self.is_on_queue || self.list_token.inner().get_state() == State::Notified);
         self.list_token.inner().prepare_park();
         let did_push = self.list_token.push_if(condition);
