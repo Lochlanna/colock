@@ -47,7 +47,7 @@ impl<T> IntrusiveLinkedList<T> {
     {
         ListToken {
             queue: self,
-            node: node,
+            node,
             _unpin: core::marker::PhantomPinned,
         }
     }
@@ -268,7 +268,7 @@ impl<T> Node<T> {
     }
 }
 
-/// A ListToken represents an interest in an entry in the list.
+/// A `ListToken` represents an interest in an entry in the list.
 /// If the list token is dropped the entry will be removed from the list.
 ///
 /// Once the token has been pushed to the list it cannot be moved again. Even if it's revoked.

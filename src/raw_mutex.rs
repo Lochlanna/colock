@@ -1,12 +1,6 @@
 use crate::event::Event;
 use crate::spinwait;
-use core::cell::Cell;
-use core::future::Future;
-use core::pin::Pin;
 use core::sync::atomic::{AtomicU8, Ordering};
-use core::task::{Context, Poll};
-use std::pin::pin;
-use std::time::Instant;
 
 const LOCKED_BIT: u8 = 1;
 const WAIT_BIT: u8 = 2;
@@ -95,10 +89,17 @@ impl RawMutex {
         }
     }
 
-    const fn on_wake(&self) -> impl Fn() -> bool + '_ {
+    const fn spin_on_wake(&self) -> impl Fn() -> bool + '_ {
         || {
             let mut state = self.state.load(Ordering::Relaxed);
-            return !self.try_lock_spin(&mut state);
+            !self.try_lock_spin(&mut state)
+        }
+    }
+
+    const fn try_on_wake(&self) -> impl Fn() -> bool + '_ {
+        || {
+            let mut state = self.state.load(Ordering::Relaxed);
+            !self.try_lock_once(&mut state)
         }
     }
 
@@ -117,15 +118,19 @@ impl RawMutex {
     }
 
     pub async fn lock_async(&self) {
-        if self
-            .state
-            .compare_exchange_weak(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
+        let Err(mut state) =
+            self.state
+                .compare_exchange_weak(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
+        else {
+            return;
+        };
+        // try lock once is slightly smarter in that it will set current correctly and spin only while the lock is unlocked!
+        if self.try_lock_once(&mut state) {
             return;
         }
+        // use try on wake rather than spin try on wake
         self.queue
-            .wait_while_async(self.should_sleep(), self.on_wake())
+            .wait_while_async(self.should_sleep(), self.try_on_wake())
             .await;
     }
 }
@@ -146,7 +151,8 @@ unsafe impl lock_api::RawMutex for RawMutex {
         if self.try_lock_spin(&mut state) {
             return;
         }
-        self.queue.wait_while(self.should_sleep(), self.on_wake());
+        self.queue
+            .wait_while(self.should_sleep(), self.spin_on_wake());
     }
 
     #[inline]
@@ -178,7 +184,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lock_api::{RawMutex as RawMutexApi, RawMutexTimed};
+    use lock_api::RawMutex as RawMutexApi;
     use std::thread;
     use std::time::{Duration, Instant};
 

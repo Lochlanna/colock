@@ -41,12 +41,12 @@ impl Event {
         false
     }
 
-    pub const fn wait_while_async<S, W>(&self, will_sleep: S, on_wake: W) -> EventPoller<'_, S, W>
+    pub const fn wait_while_async<S, W>(&self, will_sleep: S, on_wake: W) -> Poller<'_, S, W>
     where
         S: Fn() -> bool + Send,
         W: Fn() -> bool + Send,
     {
-        EventPoller {
+        Poller {
             event: self,
             will_sleep,
             on_wake,
@@ -83,7 +83,7 @@ impl Event {
     }
 }
 
-pub struct EventPoller<'a, S, W>
+pub struct Poller<'a, S, W>
 where
     S: Fn() -> bool + Send,
     W: Fn() -> bool + Send,
@@ -96,14 +96,14 @@ where
     initialised: bool,
 }
 
-unsafe impl<S, W> Send for EventPoller<'_, S, W>
+unsafe impl<S, W> Send for Poller<'_, S, W>
 where
     S: Fn() -> bool + Send,
     W: Fn() -> bool + Send,
 {
 }
 
-impl<S, W> Drop for EventPoller<'_, S, W>
+impl<S, W> Drop for Poller<'_, S, W>
 where
     S: Fn() -> bool + Send,
     W: Fn() -> bool + Send,
@@ -120,7 +120,7 @@ where
     }
 }
 
-impl<S, W> core::future::Future for EventPoller<'_, S, W>
+impl<S, W> core::future::Future for Poller<'_, S, W>
 where
     S: Fn() -> bool + Send,
     W: Fn() -> bool + Send,

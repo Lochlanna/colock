@@ -12,7 +12,7 @@ use core::hint::spin_loop;
 #[inline]
 fn cpu_relax(iterations: u32) {
     for _ in 0..iterations {
-        spin_loop()
+        spin_loop();
     }
 }
 

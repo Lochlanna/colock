@@ -13,8 +13,8 @@ enum ParkInner {
 impl Debug for ParkInner {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            ParkInner::ThreadParker(_) => f.write_str("thread"),
-            ParkInner::Waker(_) => f.write_str("waker"),
+            Self::ThreadParker(_) => f.write_str("thread"),
+            Self::Waker(_) => f.write_str("waker"),
         }
     }
 }
@@ -86,12 +86,12 @@ impl Parker {
         }
 
         while self.should_park.load(Ordering::Acquire) == State::Notifying as u8 {
-            core::hint::spin_loop()
+            core::hint::spin_loop();
         }
         true
     }
 
-    pub fn unpark_handle(&self) -> UnparkHandle {
+    pub const fn unpark_handle(&self) -> UnparkHandle {
         UnparkHandle { inner: self }
     }
 

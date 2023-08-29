@@ -143,7 +143,7 @@ impl ThreadParker {
         target_os = "espidf"
     ))]
     #[inline]
-    unsafe fn init(&self) {}
+    const unsafe fn init(&self) {}
 
     /// Initializes the condvar to use CLOCK_MONOTONIC instead of CLOCK_REALTIME.
     #[cfg(not(any(

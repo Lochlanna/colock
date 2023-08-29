@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use async_trait::async_trait;
-use std::future::Future;
 
 #[async_trait]
 pub trait Mutex<T>: Sync {

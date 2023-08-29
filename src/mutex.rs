@@ -1,4 +1,4 @@
-use crate::raw_mutex::*;
+use crate::raw_mutex::RawMutex;
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use lock_api::RawMutex as RawMutexAPI;
@@ -43,7 +43,7 @@ where
     }
 
     #[inline]
-    pub async fn lock_async<'a>(&'a self) -> MutexGuard<'a, T> {
+    pub async fn lock_async(&self) -> MutexGuard<'_, T> {
         self.raw.lock_async().await;
         MutexGuard { mutex: self }
     }
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn lots_and_lots() {
-        const J: u64 = 1000000;
+        const J: u64 = 1_000_000;
         // const J: u64 = 5000000;
         // const J: u64 = 50000000;
         const K: u64 = 6;
@@ -211,7 +211,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[cfg_attr(miri, ignore)]
     async fn lots_and_lots_async() {
-        const J: u64 = 1000000;
+        const J: u64 = 1_000_000;
         // const J: u64 = 5000000;
         // const J: u64 = 50000000;
         const K: u64 = 6;
