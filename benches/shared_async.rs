@@ -1,5 +1,7 @@
 #![allow(dead_code)]
+
 use async_trait::async_trait;
+use std::future::Future;
 
 #[async_trait]
 pub trait Mutex<T>: Sync {
@@ -40,7 +42,10 @@ where
 }
 
 #[async_trait]
-impl<T> Mutex<T> for colock::mutex::Mutex<T> {
+impl<T> Mutex<T> for colock::mutex::Mutex<T>
+where
+    T: Send,
+{
     fn new(v: T) -> Self {
         Self::new(v)
     }

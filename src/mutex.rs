@@ -9,6 +9,7 @@ pub struct Mutex<T: ?Sized> {
 }
 
 unsafe impl<T> Sync for Mutex<T> where T: ?Sized {}
+unsafe impl<T> Send for Mutex<T> where T: ?Sized + Send {}
 
 impl<T> Mutex<T> {
     pub const fn new(data: T) -> Self {
