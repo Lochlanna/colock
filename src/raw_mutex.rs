@@ -1,6 +1,7 @@
 use crate::event::Event;
 use crate::spinwait;
 use core::sync::atomic::{AtomicU8, Ordering};
+use std::time::Instant;
 
 const LOCKED_BIT: u8 = 1;
 const WAIT_BIT: u8 = 2;
@@ -181,10 +182,36 @@ unsafe impl lock_api::RawMutex for RawMutex {
     }
 }
 
+unsafe impl lock_api::RawMutexTimed for RawMutex {
+    type Duration = std::time::Duration;
+    type Instant = std::time::Instant;
+
+    fn try_lock_for(&self, timeout: Self::Duration) -> bool {
+        let timeout = Instant::now()
+            .checked_add(timeout)
+            .expect("overflow determining timeout");
+        self.try_lock_until(timeout)
+    }
+
+    fn try_lock_until(&self, timeout: Self::Instant) -> bool {
+        let Err(mut state) =
+            self.state
+                .compare_exchange_weak(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
+        else {
+            return true;
+        };
+        if self.try_lock_spin(&mut state) {
+            return true;
+        }
+        self.queue
+            .wait_while_until(self.should_sleep(), self.spin_on_wake(), timeout)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lock_api::RawMutex as RawMutexApi;
+    use lock_api::{RawMutex as RawMutexApi, RawMutexTimed};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -266,5 +293,23 @@ mod tests {
             });
         });
         assert!(!mutex.is_locked());
+    }
+
+    #[test]
+    fn lock_timeout() {
+        let mutex = RawMutex::new();
+        mutex.lock();
+        let start = Instant::now();
+        let did_lock = mutex.try_lock_for(Duration::from_millis(150));
+        assert!(!did_lock);
+        assert!(start.elapsed().as_millis() >= 150);
+        unsafe {
+            mutex.unlock();
+        }
+
+        let start = Instant::now();
+        let did_lock = mutex.try_lock_for(Duration::from_millis(150));
+        assert!(did_lock);
+        assert!(start.elapsed().as_millis() < 10);
     }
 }

@@ -7,8 +7,10 @@ mod parker;
 use crate::event::maybe_ref::MaybeRef;
 use intrusive_list::{IntrusiveLinkedList, ListToken, Node};
 use parker::{Parker, State};
+use std::cell::Cell;
 use std::pin::{pin, Pin};
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 #[derive(Debug)]
 pub struct Event {
@@ -62,14 +64,18 @@ impl Event {
         self.wait_while(will_sleep, || false);
     }
 
-    pub fn wait_while(&self, will_sleep: impl Fn() -> bool, on_wake: impl Fn() -> bool) {
+    fn token(&self) -> ListToken<Parker> {
         thread_local! {
             static NODE: Node<Parker> = const {Node::new(Parker::new())}
         }
-        let token = pin!(NODE.with(|node| {
+        NODE.with(|node| {
             let node: &'static Node<Parker> = unsafe { core::mem::transmute(node) };
             self.inner.build_token(node.into())
-        }));
+        })
+    }
+
+    pub fn wait_while(&self, will_sleep: impl Fn() -> bool, on_wake: impl Fn() -> bool) {
+        let token = pin!(self.token());
 
         token.inner().prepare_park();
         while token.as_ref().push_if(&will_sleep) {
@@ -80,6 +86,46 @@ impl Event {
             }
             token.inner().prepare_park();
         }
+    }
+
+    pub fn wait_while_until(
+        &self,
+        will_sleep: impl Fn() -> bool,
+        on_wake: impl Fn() -> bool,
+        timeout: Instant,
+    ) -> bool {
+        let token = pin!(self.token());
+
+        let did_time_out = Cell::new(false);
+        let will_sleep = || {
+            let now = Instant::now();
+            if now >= timeout {
+                did_time_out.set(true);
+                return false;
+            }
+            will_sleep()
+        };
+
+        if Instant::now() >= timeout {
+            return false;
+        }
+
+        token.inner().prepare_park();
+        while token.as_ref().push_if(will_sleep) {
+            let was_woken = token.inner().park_until(timeout);
+            if !was_woken {
+                return false;
+            }
+            debug_assert_eq!(token.inner().get_state(), State::Notified);
+            if !on_wake() {
+                return true;
+            }
+            token.inner().prepare_park();
+            if Instant::now() >= timeout {
+                return false;
+            }
+        }
+        !did_time_out.get()
     }
 }
 

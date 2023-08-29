@@ -1,7 +1,8 @@
 use crate::raw_mutex::RawMutex;
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use lock_api::RawMutex as RawMutexAPI;
+use lock_api::{RawMutex as RawMutexAPI, RawMutexTimed};
+use std::time::{Duration, Instant};
 
 pub struct Mutex<T: ?Sized> {
     raw: RawMutex,
@@ -40,6 +41,27 @@ where
     pub fn lock(&self) -> MutexGuard<'_, T> {
         self.raw.lock();
         MutexGuard { mutex: self }
+    }
+
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+        if self.raw.try_lock() {
+            return Some(MutexGuard { mutex: self });
+        }
+        None
+    }
+
+    pub fn try_lock_until(&self, timeout: Instant) -> Option<MutexGuard<'_, T>> {
+        if self.raw.try_lock_until(timeout) {
+            return Some(MutexGuard { mutex: self });
+        }
+        None
+    }
+
+    pub fn try_lock_for(&self, timeout: Duration) -> Option<MutexGuard<'_, T>> {
+        if self.raw.try_lock_for(timeout) {
+            return Some(MutexGuard { mutex: self });
+        }
+        None
     }
 
     #[inline]
