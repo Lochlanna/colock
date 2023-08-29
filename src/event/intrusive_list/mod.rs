@@ -41,13 +41,13 @@ impl<T> IntrusiveLinkedList<T> {
     }
 
     /// Build a token that references this list
-    pub fn build_token<'a>(&'a self, node: impl Into<MaybeRef<'a, Node<T>>>) -> ListToken<'a, T>
+    pub const fn build_token<'a>(&'a self, node: MaybeRef<'a, Node<T>>) -> ListToken<'a, T>
     where
         T: 'a,
     {
         ListToken {
             queue: self,
-            node: node.into(),
+            node: node,
             _unpin: core::marker::PhantomPinned,
         }
     }
@@ -177,6 +177,9 @@ pub struct Node<T> {
     is_on_queue: Cell<bool>,
     data: T,
 }
+
+unsafe impl<T> Send for Node<T> where T: Send {}
+
 impl<T> Node<T> {
     pub const fn new(data: T) -> Self {
         Self {
@@ -345,11 +348,11 @@ mod tests {
     #[test]
     fn basic_push() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = pin!(queue.build_token(Node::new(32)));
+        let node_a = pin!(queue.build_token(Node::new(32).into()));
         node_a.as_ref().push();
-        let node_b = pin!(queue.build_token(Node::new(42)));
+        let node_b = pin!(queue.build_token(Node::new(42).into()));
         node_b.as_ref().push();
-        let node_c = pin!(queue.build_token(Node::new(21)));
+        let node_c = pin!(queue.build_token(Node::new(21).into()));
         node_c.as_ref().push();
         let elements = queue.to_vec();
         assert_eq!(elements, vec![21, 42, 32]);
@@ -359,11 +362,11 @@ mod tests {
     #[test]
     fn revoke_head() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = pin!(queue.build_token(Node::new(32)));
+        let node_a = pin!(queue.build_token(Node::new(32).into()));
         node_a.as_ref().push();
-        let node_b = pin!(queue.build_token(Node::new(42)));
+        let node_b = pin!(queue.build_token(Node::new(42).into()));
         node_b.as_ref().push();
-        let node_c = pin!(queue.build_token(Node::new(21)));
+        let node_c = pin!(queue.build_token(Node::new(21).into()));
         node_c.as_ref().push();
         let elements = queue.to_vec();
         assert_eq!(elements, vec![21, 42, 32]);
@@ -384,11 +387,11 @@ mod tests {
     #[test]
     fn revoke_tail() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = pin!(queue.build_token(Node::new(32)));
+        let node_a = pin!(queue.build_token(Node::new(32).into()));
         node_a.as_ref().push();
-        let node_b = pin!(queue.build_token(Node::new(42)));
+        let node_b = pin!(queue.build_token(Node::new(42).into()));
         node_b.as_ref().push();
-        let node_c = pin!(queue.build_token(Node::new(21)));
+        let node_c = pin!(queue.build_token(Node::new(21).into()));
         node_c.as_ref().push();
         let elements = queue.to_vec();
         assert_eq!(elements, vec![21, 42, 32]);
@@ -409,11 +412,11 @@ mod tests {
     #[test]
     fn revoke_middle() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = pin!(queue.build_token(Node::new(32)));
+        let node_a = pin!(queue.build_token(Node::new(32).into()));
         node_a.as_ref().push();
-        let node_b = pin!(queue.build_token(Node::new(42)));
+        let node_b = pin!(queue.build_token(Node::new(42).into()));
         node_b.as_ref().push();
-        let node_c = pin!(queue.build_token(Node::new(21)));
+        let node_c = pin!(queue.build_token(Node::new(21).into()));
         node_c.as_ref().push();
         let elements = queue.to_vec();
 
@@ -435,11 +438,11 @@ mod tests {
     #[test]
     fn drop_test() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = pin!(queue.build_token(Box::new(Node::new(32))));
+        let node_a = pin!(queue.build_token(Box::new(Node::new(32)).into()));
         node_a.as_ref().push();
-        let node_c = pin!(queue.build_token(Box::new(Node::new(21))));
+        let node_c = pin!(queue.build_token(Box::new(Node::new(21)).into()));
         {
-            let node_b = pin!(queue.build_token(Box::new(Node::new(42))));
+            let node_b = pin!(queue.build_token(Box::new(Node::new(42)).into()));
             node_b.as_ref().push();
             node_c.as_ref().push();
 
@@ -451,11 +454,11 @@ mod tests {
     #[test]
     fn pop() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = pin!(queue.build_token(Node::new(32)));
+        let node_a = pin!(queue.build_token(Node::new(32).into()));
         node_a.as_ref().push();
-        let node_b = pin!(queue.build_token(Node::new(42)));
+        let node_b = pin!(queue.build_token(Node::new(42).into()));
         node_b.as_ref().push();
-        let node_c = pin!(queue.build_token(Node::new(21)));
+        let node_c = pin!(queue.build_token(Node::new(21).into()));
         node_c.as_ref().push();
         assert_eq!(queue.to_vec(), vec![21, 42, 32]);
 
@@ -527,7 +530,7 @@ mod tests {
                     let mut tokens = Vec::with_capacity(num_elements);
                     barrier.wait();
                     for i in 0..num_elements {
-                        let token = Box::pin(queue.build_token(Node::new(i)));
+                        let token = Box::pin(queue.build_token(Node::new(i).into()));
                         token.as_ref().push();
                         tokens.push(token);
                     }

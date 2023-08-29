@@ -19,7 +19,7 @@ pub trait Mutex<T>: Sync {
 }
 
 #[async_trait]
-impl<T> Mutex<T> for colock::mutex::Mutex<T> {
+impl<T: std::marker::Send> Mutex<T> for colock::mutex::Mutex<T> {
     fn new(v: T) -> Self {
         Self::new(v)
     }

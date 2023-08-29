@@ -1,12 +1,13 @@
 mod thread_parker;
 
 use crate::event::parker::thread_parker::ThreadParkerT;
+use std::cell::Cell;
 use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 enum ParkInner {
     ThreadParker(thread_parker::ThreadParker),
-    Waker(core::task::Waker),
+    Waker(Cell<Option<core::task::Waker>>),
 }
 
 impl Debug for ParkInner {
@@ -40,9 +41,9 @@ impl Parker {
         }
     }
 
-    pub const fn new_with_waker(waker: core::task::Waker) -> Self {
+    pub const fn new_async() -> Self {
         Self {
-            inner: ParkInner::Waker(waker),
+            inner: ParkInner::Waker(Cell::new(None)),
             should_park: AtomicU8::new(State::Waiting as u8),
         }
     }
@@ -94,6 +95,13 @@ impl Parker {
         UnparkHandle { inner: self }
     }
 
+    pub fn replace_waker(&self, waker: core::task::Waker) {
+        match &self.inner {
+            ParkInner::ThreadParker(_) => panic!("can't replace waker on a thread parker"),
+            ParkInner::Waker(inner) => inner.replace(Some(waker)),
+        };
+    }
+
     pub fn get_state(&self) -> State {
         let should_park = self.should_park.load(Ordering::Acquire);
         match should_park {
@@ -119,7 +127,7 @@ impl UnparkHandle {
         if did_unpark {
             match &parker.inner {
                 ParkInner::ThreadParker(thread) => unsafe { thread.unpark() },
-                ParkInner::Waker(waker) => waker.wake_by_ref(),
+                ParkInner::Waker(waker) => waker.take().expect("there was no waker").wake(),
             }
         }
         parker

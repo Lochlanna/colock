@@ -1,12 +1,26 @@
 use std::ops::Deref;
-use std::sync::Arc;
 
 #[derive(Debug)]
 pub enum MaybeRef<'a, T> {
     Ref(&'a T),
     Owned(T),
     Boxed(Box<T>),
-    Arc(Arc<T>),
+}
+
+unsafe impl<T> Send for MaybeRef<'_, T> where T: Send {}
+
+impl<'a, T> MaybeRef<'a, T> {
+    pub const fn new_owned(inner: T) -> Self {
+        Self::Owned(inner)
+    }
+
+    pub const fn new_ref(inner: &'a T) -> Self {
+        Self::Ref(inner)
+    }
+
+    pub const fn new_boxed(inner: Box<T>) -> Self {
+        Self::Boxed(inner)
+    }
 }
 
 impl<T> From<T> for MaybeRef<'_, T> {
@@ -27,12 +41,6 @@ impl<'a, T> From<Box<T>> for MaybeRef<'a, T> {
     }
 }
 
-impl<'a, T> From<Arc<T>> for MaybeRef<'a, T> {
-    fn from(value: Arc<T>) -> Self {
-        Self::Arc(value)
-    }
-}
-
 impl<'a, T> Deref for MaybeRef<'a, T> {
     type Target = T;
 
@@ -41,7 +49,6 @@ impl<'a, T> Deref for MaybeRef<'a, T> {
             MaybeRef::Ref(value) => value,
             MaybeRef::Owned(value) => value,
             MaybeRef::Boxed(value) => value,
-            MaybeRef::Arc(value) => value,
         }
     }
 }

@@ -4,11 +4,11 @@ mod intrusive_list;
 mod maybe_ref;
 mod parker;
 
-use core::task::Waker;
+use crate::event::maybe_ref::MaybeRef;
 use intrusive_list::{IntrusiveLinkedList, ListToken, Node};
 use parker::{Parker, State};
-use std::cell::Cell;
-use std::pin::Pin;
+use std::pin::{pin, Pin};
+use std::task::{Context, Poll};
 
 #[derive(Debug)]
 pub struct Event {
@@ -21,30 +21,6 @@ impl Event {
             inner: IntrusiveLinkedList::new(),
         }
     }
-
-    pub fn new_listener(&self) -> EventListener<'_> {
-        thread_local! {
-            static NODE: Node<Parker> = const {Node::new(Parker::new())}
-        }
-        NODE.with(|node| {
-            let node: &'static Node<Parker> = unsafe { core::mem::transmute(node) };
-            EventListener {
-                event: self,
-                list_token: self.inner.build_token(node),
-                is_on_queue: Cell::new(false),
-            }
-        })
-    }
-
-    pub fn new_async_listener(&self, waker: Waker) -> EventListener<'_> {
-        let node = Node::new(Parker::new_with_waker(waker));
-        EventListener {
-            event: self,
-            list_token: self.inner.build_token(node),
-            is_on_queue: Cell::new(false),
-        }
-    }
-
     pub fn notify_one(&self) -> bool {
         self.notify_if(|_| true, || {})
     }
@@ -64,150 +40,161 @@ impl Event {
         }
         false
     }
+
+    pub const fn wait_while_async<S, W>(&self, will_sleep: S, on_wake: W) -> EventPoller<'_, S, W>
+    where
+        S: Fn() -> bool + Send,
+        W: Fn() -> bool + Send,
+    {
+        EventPoller {
+            event: self,
+            will_sleep,
+            on_wake,
+            list_token: self
+                .inner
+                .build_token(MaybeRef::Owned(Node::new(Parker::new_async()))),
+            did_finish: false,
+            initialised: false,
+        }
+    }
+
+    pub fn wait_once(&self, will_sleep: impl Fn() -> bool) {
+        self.wait_while(will_sleep, || false);
+    }
+
+    pub fn wait_while(&self, will_sleep: impl Fn() -> bool, on_wake: impl Fn() -> bool) {
+        thread_local! {
+            static NODE: Node<Parker> = const {Node::new(Parker::new())}
+        }
+        let token = pin!(NODE.with(|node| {
+            let node: &'static Node<Parker> = unsafe { core::mem::transmute(node) };
+            self.inner.build_token(node.into())
+        }));
+        token.inner().prepare_park();
+        while token.as_ref().push_if(&will_sleep) {
+            token.inner().park();
+            if !on_wake() {
+                return;
+            }
+        }
+    }
 }
-#[derive(Debug)]
-pub struct EventListener<'a> {
+
+pub struct EventPoller<'a, S, W>
+where
+    S: Fn() -> bool + Send,
+    W: Fn() -> bool + Send,
+{
     event: &'a Event,
+    will_sleep: S,
+    on_wake: W,
     list_token: ListToken<'a, Parker>,
-    is_on_queue: Cell<bool>,
+    did_finish: bool,
+    initialised: bool,
 }
 
-impl Drop for EventListener<'_> {
+unsafe impl<S, W> Send for EventPoller<'_, S, W>
+where
+    S: Fn() -> bool + Send,
+    W: Fn() -> bool + Send,
+{
+}
+
+impl<S, W> Drop for EventPoller<'_, S, W>
+where
+    S: Fn() -> bool + Send,
+    W: Fn() -> bool + Send,
+{
     fn drop(&mut self) {
-        self.cancel();
+        if self.did_finish {
+            return;
+        }
+        if self.initialised && !self.list_token.revoke() {
+            // Our waker was popped of the queue but we didn't get polled. This means the notification was lost
+            // We have to blindly attempt to wake someone else. This could be expensive but should be rare!
+            self.event.notify_one();
+        }
     }
 }
 
-impl EventListener<'_> {
-    pub fn register_if(self: Pin<&Self>, condition: impl FnOnce() -> bool) -> bool {
-        debug_assert!(
-            !self.is_on_queue.get() || self.list_token.inner().get_state() == State::Notified
-        );
-        self.list_token.inner().prepare_park();
-        let pinned_token = unsafe { Pin::new_unchecked(&self.list_token) };
-        let did_push = pinned_token.push_if(condition);
+impl<S, W> core::future::Future for EventPoller<'_, S, W>
+where
+    S: Fn() -> bool + Send,
+    W: Fn() -> bool + Send,
+{
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = unsafe { self.get_unchecked_mut() };
+        if this.initialised {
+            debug_assert_ne!(this.list_token.inner().get_state(), State::Waiting);
+            while this.list_token.inner().get_state() != State::Notified {
+                // the list token has already been revoked but we haven't been woken up yet!
+                core::hint::spin_loop();
+            }
+            if !(this.on_wake)() {
+                this.did_finish = true;
+                return Poll::Ready(());
+            }
+        }
+        this.list_token.inner().replace_waker(cx.waker().clone());
+        this.initialised = true;
+
+        let pinned_token = unsafe { Pin::new_unchecked(&this.list_token) };
+        let did_push = pinned_token.push_if(&this.will_sleep);
         if did_push {
-            self.is_on_queue.set(true);
+            Poll::Pending
+        } else {
+            this.did_finish = true;
+            Poll::Ready(())
         }
-        did_push
-    }
-
-    pub fn register(self: Pin<&Self>) {
-        self.register_if(|| true);
-    }
-    pub fn wait(self: Pin<&Self>) {
-        self.list_token.inner().park();
-        self.is_on_queue.set(false);
-    }
-
-    /// Returns true if the timeout was not reached (it was woken up!)
-    pub fn wait_until(self: Pin<&Self>, timeout: std::time::Instant) -> bool {
-        let result = self.list_token.inner().park_until(timeout);
-        if !result {
-            self.cancel();
-        }
-        self.is_on_queue.set(false);
-        result
-    }
-    pub fn is_on_queue(&self) -> bool {
-        self.is_on_queue.get()
-    }
-
-    pub(crate) fn set_off_queue(&mut self) {
-        self.is_on_queue.set(false);
-    }
-
-    /// Returns true if the cancellation was successful (had not been woken up)
-    pub fn cancel(&self) -> bool {
-        if !self.is_on_queue.get() {
-            return true;
-        }
-        self.is_on_queue.set(false);
-        if self.list_token.revoke() {
-            return true;
-        }
-        while self.list_token.inner().get_state() != State::Notified {
-            // the list token has already been revoked but we haven't been woken up yet!
-            core::hint::spin_loop();
-        }
-        false
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::pin::pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Duration;
     #[test]
-    fn test_event() {
+    fn basic_wait() {
         let event = Event::new();
-        let barrier = std::sync::Barrier::new(2);
         let test_val = AtomicBool::new(false);
+        let barrier = std::sync::Barrier::new(2);
         thread::scope(|s| {
             s.spawn(|| {
                 barrier.wait();
                 thread::sleep(Duration::from_millis(50));
                 test_val.store(true, Ordering::SeqCst);
-                debug_assert!(event.notify_one());
-                barrier.wait();
+                assert!(event.notify_one());
             });
-            let listen_guard = pin!(event.new_listener());
-
-            listen_guard.as_ref().register();
-            barrier.wait();
             assert!(!test_val.load(Ordering::SeqCst));
-            listen_guard.as_ref().wait();
+            barrier.wait();
+            event.wait_while(|| true, || false);
             assert!(test_val.load(Ordering::SeqCst));
-            barrier.wait();
         });
     }
 
-    #[test]
-    fn test_drop() {
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn async_event() {
         let event = Event::new();
-        let barrier = std::sync::Barrier::new(2);
-        thread::scope(|s| {
-            s.spawn(|| {
-                {
-                    let listen_guard = pin!(event.new_listener());
-                    listen_guard.as_ref().register();
-                    barrier.wait();
-                }
-                barrier.wait();
+        let test_val = AtomicBool::new(false);
+        let barrier = tokio::sync::Barrier::new(2);
+        tokio_scoped::scope(|s| {
+            s.spawn(async {
+                barrier.wait().await;
+                thread::sleep(Duration::from_millis(50));
+                test_val.store(true, Ordering::SeqCst);
+                assert!(event.notify_one());
             });
-            barrier.wait();
-            thread::sleep(Duration::from_millis(50));
-            assert!(!event.notify_one());
-            barrier.wait();
-        });
-    }
-
-    #[test]
-    fn test_drop_spin() {
-        let event = Event::new();
-        let barrier = std::sync::Barrier::new(2);
-        thread::scope(|s| {
-            s.spawn(|| {
-                {
-                    let listen_guard = pin!(event.new_listener());
-                    listen_guard.as_ref().register();
-                    barrier.wait();
-                    barrier.wait();
-                }
-                barrier.wait();
+            s.spawn(async {
+                assert!(!test_val.load(Ordering::SeqCst));
+                barrier.wait().await;
+                event.wait_while_async(|| true, || false).await;
+                assert!(test_val.load(Ordering::SeqCst));
             });
-            barrier.wait();
-            let handle = event.inner.pop_if(
-                |p, _| Some(p.unpark_handle()),
-                || panic!("shouldn't fail to pop"),
-            );
-            barrier.wait();
-            thread::sleep(Duration::from_millis(20));
-            debug_assert!(handle.expect("pop failed unpark handle was None").un_park());
-            barrier.wait();
         });
     }
 }

@@ -1,7 +1,7 @@
 use crate::raw_mutex::*;
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use lock_api::{RawMutex as RawMutexAPI, RawMutexTimed};
+use lock_api::RawMutex as RawMutexAPI;
 
 pub struct Mutex<T: ?Sized> {
     raw: RawMutex,
@@ -42,24 +42,9 @@ where
     }
 
     #[inline]
-    pub fn lock_async<'a>(&'a self) -> Poller<'_, impl Fn() -> MutexGuard<'a, T>> {
-        self.raw.lock_async(|| MutexGuard { mutex: self })
-    }
-
-    pub fn try_lock_until(&self, timeout: std::time::Instant) -> Option<MutexGuard<'_, T>> {
-        if self.raw.try_lock_until(timeout) {
-            Some(MutexGuard { mutex: self })
-        } else {
-            None
-        }
-    }
-
-    pub fn try_lock_for(&self, duration: std::time::Duration) -> Option<MutexGuard<'_, T>> {
-        if self.raw.try_lock_for(duration) {
-            Some(MutexGuard { mutex: self })
-        } else {
-            None
-        }
+    pub async fn lock_async<'a>(&'a self) -> MutexGuard<'a, T> {
+        self.raw.lock_async().await;
+        MutexGuard { mutex: self }
     }
 }
 
@@ -195,13 +180,13 @@ mod tests {
             for _ in 0..k {
                 s.spawn(async {
                     for _ in 0..j {
-                        *m.lock() += 1;
+                        *m.lock_async().await += 1;
                     }
                 });
             }
         });
 
-        assert_eq!(*m.lock(), j * k);
+        assert_eq!(*m.lock_async().await, j * k);
     }
 
     #[test]
