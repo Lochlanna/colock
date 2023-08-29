@@ -184,7 +184,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
 
 unsafe impl lock_api::RawMutexTimed for RawMutex {
     type Duration = std::time::Duration;
-    type Instant = std::time::Instant;
+    type Instant = Instant;
 
     fn try_lock_for(&self, timeout: Self::Duration) -> bool {
         let timeout = Instant::now()
@@ -328,7 +328,7 @@ mod tests {
             _ = tokio::time::sleep(Duration::from_millis(150)) => {
                 did_lock = false;
             }
-        };
+        }
         assert!(!did_lock);
         assert!(start.elapsed().as_millis() >= 150);
         unsafe {

@@ -5,9 +5,9 @@ mod maybe_ref;
 mod parker;
 
 use crate::event::maybe_ref::MaybeRef;
-use crate::event::parker::State::Notified;
+use crate::event::parker::State;
 use intrusive_list::{IntrusiveLinkedList, ListToken, Node};
-use parker::{Parker, State};
+use parker::Parker;
 use std::cell::Cell;
 use std::pin::{pin, Pin};
 use std::task::{Context, Poll};
@@ -65,7 +65,7 @@ impl Event {
         self.wait_while(will_sleep, || false);
     }
 
-    fn token(&self) -> ListToken<Parker> {
+    fn get_thread_token(&self) -> ListToken<Parker> {
         thread_local! {
             static NODE: Node<Parker> = const {Node::new(Parker::new())}
         }
@@ -75,11 +75,11 @@ impl Event {
         })
     }
 
-    pub fn wait_while(&self, will_sleep: impl Fn() -> bool, on_wake: impl Fn() -> bool) {
-        let token = pin!(self.token());
+    pub fn wait_while(&self, should_sleep: impl Fn() -> bool, on_wake: impl Fn() -> bool) {
+        let token = pin!(self.get_thread_token());
 
         token.inner().prepare_park();
-        while token.as_ref().push_if(&will_sleep) {
+        while token.as_ref().push_if(&should_sleep) {
             token.inner().park();
             debug_assert_eq!(token.inner().get_state(), State::Notified);
             if !on_wake() {
@@ -91,11 +91,11 @@ impl Event {
 
     pub fn wait_while_until(
         &self,
-        will_sleep: impl Fn() -> bool,
+        should_sleep: impl Fn() -> bool,
         on_wake: impl Fn() -> bool,
         timeout: Instant,
     ) -> bool {
-        let token = pin!(self.token());
+        let token = pin!(self.get_thread_token());
 
         let did_time_out = Cell::new(false);
 
@@ -106,7 +106,7 @@ impl Event {
                 did_time_out.set(true);
                 return false;
             }
-            will_sleep()
+            should_sleep()
         };
 
         if Instant::now() >= timeout {
@@ -122,7 +122,7 @@ impl Event {
                     // We have already been popped of the queue
                     // We need to wait for the notification so that the notify function doesn't
                     // access the data we are holding on our stack in the waker
-                    while token.inner().get_state() != Notified {
+                    while token.inner().get_state() != State::Notified {
                         core::hint::spin_loop();
                     }
                     return true;
