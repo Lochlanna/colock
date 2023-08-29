@@ -309,6 +309,11 @@ where
         };
 
         let this = unsafe { self.get_unchecked_mut() };
+
+        if let Some(listener) = &this.listener {
+            listener.cancel();
+        }
+
         let mut state = 0;
         while state & LOCKED_BIT == 0 {
             if let Err(new_state) = this.mutex.state.compare_exchange_weak(
@@ -325,7 +330,7 @@ where
 
         let listener = this
             .listener
-            .get_or_insert_with(|| this.mutex.queue.new_async_listener(cx.waker().clone()));
+            .insert(this.mutex.queue.new_async_listener(cx.waker().clone()));
         let listener = unsafe { Pin::new_unchecked(&*listener) };
         if !listener.register_if(this.mutex.conditional_register()) {
             //register will fail if it gets the lock!

@@ -128,7 +128,7 @@ impl EventListener<'_> {
         }
         while self.list_token.inner().get_state() != State::Notified {
             // the list token has already been revoked but we haven't been woken up yet!
-            core::hint::spin_loop()
+            core::hint::spin_loop();
         }
         false
     }
@@ -191,11 +191,12 @@ mod tests {
         let barrier = std::sync::Barrier::new(2);
         thread::scope(|s| {
             s.spawn(|| {
-                let listen_guard = pin!(event.new_listener());
-                listen_guard.as_ref().register();
-                barrier.wait();
-                barrier.wait();
-                drop(listen_guard);
+                {
+                    let listen_guard = pin!(event.new_listener());
+                    listen_guard.as_ref().register();
+                    barrier.wait();
+                    barrier.wait();
+                }
                 barrier.wait();
             });
             barrier.wait();

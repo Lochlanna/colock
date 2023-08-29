@@ -1,7 +1,7 @@
 use crate::event::maybe_ref::MaybeRef;
 use core::cell::Cell;
 use core::fmt::{Debug, Formatter};
-use core::pin::{pin, Pin};
+use core::pin::Pin;
 
 /// Outer container for intrusive linked list. Proxies calls to the inner list
 /// through the spin lock

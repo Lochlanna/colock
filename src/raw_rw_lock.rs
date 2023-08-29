@@ -87,7 +87,7 @@ unsafe impl lock_api::RawRwLock for RawRWLock {
             return;
         }
         // we failed to grab the lock, so we need to wait
-        let mut listener = pin!(self.read_queue.new_listener());
+        let listener = pin!(self.read_queue.new_listener());
 
         while listener
             .as_ref()
