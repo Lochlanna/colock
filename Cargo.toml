@@ -28,6 +28,7 @@ criterion = { version = "0.5.1", features = ["stable", "async_tokio"] }
 tokio = { version = "1", features = ["full"] }
 tokio-scoped = "0.2.0"
 async-trait = "0.1.73"
+futures-polling = "0.1.1"
 
 
 #for benchmarks

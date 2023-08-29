@@ -51,6 +51,10 @@ impl<T> IntrusiveLinkedList<T> {
             _unpin: core::marker::PhantomPinned,
         }
     }
+
+    pub fn len(&self) -> usize {
+        self.inner.lock().len()
+    }
 }
 
 impl<T> IntrusiveLinkedList<T>
@@ -110,6 +114,20 @@ impl<T> IntrusiveLinkedListInner<T> {
             debug_assert!(!tail.is_on_queue.get());
             ret
         }
+    }
+
+    fn len(&self) -> usize {
+        let mut count = 0;
+        if self.head.is_null() {
+            return 0;
+        }
+        let mut current = self.head;
+        while !current.is_null() {
+            let current_ref = unsafe { &*current };
+            count += 1;
+            current = current_ref.next.get();
+        }
+        count
     }
 }
 

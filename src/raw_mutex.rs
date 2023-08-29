@@ -296,6 +296,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn lock_timeout() {
         let mutex = RawMutex::new();
         mutex.lock();
@@ -311,5 +312,27 @@ mod tests {
         let did_lock = mutex.try_lock_for(Duration::from_millis(150));
         assert!(did_lock);
         assert!(start.elapsed().as_millis() < 10);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn async_lock_timeout() {
+        let mutex = RawMutex::new();
+        mutex.lock_async().await;
+        let start = Instant::now();
+        let did_lock;
+        tokio::select! {
+            _ = mutex.lock_async() => {
+                did_lock = true;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(150)) => {
+                did_lock = false;
+            }
+        };
+        assert!(!did_lock);
+        assert!(start.elapsed().as_millis() >= 150);
+        unsafe {
+            mutex.unlock();
+        }
     }
 }

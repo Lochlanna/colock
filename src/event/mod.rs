@@ -5,6 +5,7 @@ mod maybe_ref;
 mod parker;
 
 use crate::event::maybe_ref::MaybeRef;
+use crate::event::parker::State::Notified;
 use intrusive_list::{IntrusiveLinkedList, ListToken, Node};
 use parker::{Parker, State};
 use std::cell::Cell;
@@ -97,6 +98,8 @@ impl Event {
         let token = pin!(self.token());
 
         let did_time_out = Cell::new(false);
+
+        // extend the will sleep function with timeout check code
         let will_sleep = || {
             let now = Instant::now();
             if now >= timeout {
@@ -114,6 +117,16 @@ impl Event {
         while token.as_ref().push_if(will_sleep) {
             let was_woken = token.inner().park_until(timeout);
             if !was_woken {
+                //TODO it should be possible to test this using a similar method to the async abort
+                if !token.revoke() {
+                    // We have already been popped of the queue
+                    // We need to wait for the notification so that the notify function doesn't
+                    // access the data we are holding on our stack in the waker
+                    while token.inner().get_state() != Notified {
+                        core::hint::spin_loop();
+                    }
+                    return true;
+                }
                 return false;
             }
             debug_assert_eq!(token.inner().get_state(), State::Notified);
@@ -176,9 +189,16 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
         if this.initialised {
-            debug_assert_ne!(this.list_token.inner().get_state(), State::Waiting);
-            while this.list_token.inner().get_state() != State::Notified {
+            let mut inner_state = this.list_token.inner().get_state();
+            if inner_state == State::Waiting && this.list_token.revoke() {
+                // This can happen when using tokio::select
+                // It seems to poll the future one last time even if the waker hasn't been called!
+                // TODO verify sure this is what is happening...
+                inner_state = State::Notified;
+            }
+            while inner_state != State::Notified {
                 // the list token has already been revoked but we haven't been woken up yet!
+                inner_state = this.list_token.inner().get_state();
                 core::hint::spin_loop();
             }
             if !(this.on_wake)() {
@@ -204,6 +224,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_polling::FuturePollingExt;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Duration;
@@ -246,5 +267,50 @@ mod tests {
                 assert!(test_val.load(Ordering::SeqCst));
             });
         });
+    }
+
+    /// Test that dropping the future before it is complete will result in it being revoked from
+    /// the queue
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn cancel_async() {
+        let event = Event::new();
+        {
+            let poller = pin!(event.wait_while_async(|| true, || false));
+            let mut polling = poller.polling();
+            let result = polling.poll_once().await;
+            assert_eq!(result, Poll::Pending);
+            assert_eq!(event.inner.len(), 1);
+        }
+        assert_eq!(event.inner.len(), 0);
+    }
+
+    /// This test ensures that another thread is woken up in the case that a future is aborted
+    /// in the time between it being popped from the queue by a notify and the wake up being registered.
+    /// In this case it should detect this on drop and fire the notify function again
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn abort_wake_async() {
+        let event = Event::new();
+        let second_entry;
+        let mut second_polling;
+        {
+            let poller = pin!(event.wait_while_async(|| true, || false));
+            let mut polling = poller.polling();
+            let result = polling.poll_once().await;
+            assert_eq!(result, Poll::Pending);
+            assert_eq!(event.inner.len(), 1);
+            event
+                .inner
+                .pop_if(|_, _| Some(()), || panic!("shouldn't be empty"));
+            second_entry = Box::pin(event.wait_while_async(|| true, || false));
+            second_polling = second_entry.polling();
+            let result = second_polling.poll_once().await;
+            assert_eq!(result, Poll::Pending);
+            assert_eq!(event.inner.len(), 1);
+        }
+        let result = second_polling.poll_once().await;
+        assert_eq!(result, Poll::Ready(()));
+        assert_eq!(event.inner.len(), 0);
     }
 }
