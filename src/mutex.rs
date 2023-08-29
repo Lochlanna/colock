@@ -192,7 +192,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn lots_and_lots() {
-        const J: u64 = 100000;
+        const J: u64 = 1000000;
         // const J: u64 = 5000000;
         // const J: u64 = 50000000;
         const K: u64 = 6;
@@ -210,7 +210,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[cfg_attr(miri, ignore)]
     async fn lots_and_lots_async() {
-        const J: u64 = 10000;
+        const J: u64 = 1000000;
         // const J: u64 = 5000000;
         // const J: u64 = 50000000;
         const K: u64 = 6;

@@ -69,7 +69,7 @@ impl Parker {
         }
 
         while self.should_park.load(Ordering::Acquire) == State::Notifying as u8 {
-            core::hint::spin_loop()
+            core::hint::spin_loop();
         }
     }
 

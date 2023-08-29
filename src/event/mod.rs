@@ -70,12 +70,15 @@ impl Event {
             let node: &'static Node<Parker> = unsafe { core::mem::transmute(node) };
             self.inner.build_token(node.into())
         }));
+
         token.inner().prepare_park();
         while token.as_ref().push_if(&will_sleep) {
             token.inner().park();
+            debug_assert_eq!(token.inner().get_state(), State::Notified);
             if !on_wake() {
                 return;
             }
+            token.inner().prepare_park();
         }
     }
 }
@@ -141,6 +144,7 @@ where
         this.initialised = true;
 
         let pinned_token = unsafe { Pin::new_unchecked(&this.list_token) };
+        pinned_token.inner().prepare_park();
         let did_push = pinned_token.push_if(&this.will_sleep);
         if did_push {
             Poll::Pending
