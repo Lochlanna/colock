@@ -27,6 +27,40 @@ impl Event {
     pub fn notify_one(&self) -> bool {
         self.notify_if(|_| true, || {})
     }
+
+    pub fn notify_all_while(
+        &self,
+        condition: impl Fn(usize) -> bool,
+        on_empty: impl Fn(),
+    ) -> usize {
+        self.notify_many_while(usize::MAX, condition, on_empty)
+    }
+
+    pub fn notify_many_while(
+        &self,
+        max: usize,
+        condition: impl Fn(usize) -> bool,
+        on_empty: impl Fn(),
+    ) -> usize {
+        if max == 0 {
+            return 0;
+        }
+        let max = Cell::new(max);
+        let get_count = |num_in_queue| {
+            max.set(max.get().min(num_in_queue));
+            condition(num_in_queue)
+        };
+        if !self.notify_if(get_count, &on_empty) {
+            return 0;
+        }
+        let mut num_notified = 1;
+        let max = max.get();
+        while num_notified < max && self.notify_if(&condition, &on_empty) {
+            num_notified += 1;
+        }
+
+        num_notified
+    }
     pub fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn()) -> bool {
         while let Some(unpark_handle) = self.inner.pop_if(
             |parker, num_left| {
@@ -225,9 +259,12 @@ where
 mod tests {
     use super::*;
     use futures_polling::FuturePollingExt;
+    use itertools::Itertools;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
+
     #[test]
     fn basic_wait() {
         let event = Event::new();
@@ -312,5 +349,37 @@ mod tests {
         let result = second_polling.poll_once().await;
         assert_eq!(result, Poll::Ready(()));
         assert_eq!(event.inner.len(), 0);
+    }
+
+    #[test]
+    fn notify_many() {
+        let event = Arc::new(Event::new());
+        let barrier = Arc::new(std::sync::Barrier::new(6));
+        let handles = (0..5)
+            .map(|_| {
+                let event = event.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    event.wait_while(|| true, || false);
+                })
+            })
+            .collect_vec();
+
+        barrier.wait();
+        while event.inner.len() < 5 {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(event.inner.len(), 5);
+        let num_woken = event.notify_many_while(2, |_| true, || panic!("shouldn't be empty"));
+        assert_eq!(num_woken, 2);
+        assert_eq!(event.inner.len(), 3);
+        let num_woken = event.notify_all_while(|_| true, || panic!("shouldn't be empty"));
+        assert_eq!(num_woken, 3);
+        assert_eq!(event.inner.len(), 0);
+
+        handles
+            .into_iter()
+            .for_each(|jh| jh.join().expect("couldn't join thread"));
     }
 }

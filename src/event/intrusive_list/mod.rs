@@ -116,18 +116,8 @@ impl<T> IntrusiveLinkedListInner<T> {
         }
     }
 
-    fn len(&self) -> usize {
-        let mut count = 0;
-        if self.head.is_null() {
-            return 0;
-        }
-        let mut current = self.head;
-        while !current.is_null() {
-            let current_ref = unsafe { &*current };
-            count += 1;
-            current = current_ref.next.get();
-        }
-        count
+    const fn len(&self) -> usize {
+        self.length
     }
 }
 
