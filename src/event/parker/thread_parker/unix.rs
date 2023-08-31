@@ -33,7 +33,7 @@ pub struct ThreadParker {
 
 impl ThreadParker {
     pub const fn const_new() -> Self {
-        ThreadParker {
+        Self {
             should_park: Cell::new(false),
             mutex: UnsafeCell::new(libc::PTHREAD_MUTEX_INITIALIZER),
             condvar: UnsafeCell::new(libc::PTHREAD_COND_INITIALIZER),
@@ -46,7 +46,7 @@ impl super::ThreadParkerT for ThreadParker {
     const IS_CHEAP_TO_CONSTRUCT: bool = false;
 
     #[inline]
-    fn new() -> ThreadParker {
+    fn new() -> Self {
         Self::const_new()
     }
 
