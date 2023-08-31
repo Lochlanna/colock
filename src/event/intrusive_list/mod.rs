@@ -77,8 +77,9 @@ impl<T> IntrusiveLinkedList<T> {
         condition: impl FnOnce(&T, usize) -> Option<R>,
         on_empty: impl FnOnce(),
     ) -> Option<R> {
-        let mut guard = self.protected.lock();
-        // println!("on pop: {}", self.internal_fmt(&mut guard));
+        let mut guard = self
+            .protected
+            .try_lock_while(|| !self.head.load(Ordering::Relaxed).is_null())?;
         let head = self.back_fill(&mut guard);
         if head.is_null() {
             //it's empty!

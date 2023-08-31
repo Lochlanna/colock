@@ -10,7 +10,7 @@ use intrusive_list::{IntrusiveLinkedList, ListToken, Node};
 use parker::Parker;
 use std::cell::Cell;
 use std::pin::{pin, Pin};
-use std::sync::atomic::{fence, Ordering};
+use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -128,6 +128,11 @@ impl Event {
         token.inner().prepare_park();
         while token.as_ref().push_if(&should_register) {
             if !should_sleep() {
+                if !token.revoke() {
+                    // we are about to be woken up. So go to sleep until we get woken up
+                    token.inner().park();
+                    debug_assert_eq!(token.inner().get_state(), State::Notified);
+                }
                 return;
             }
             token.inner().park();
@@ -167,6 +172,11 @@ impl Event {
         token.inner().prepare_park();
         while token.as_ref().push_if(should_register) {
             if !should_sleep() {
+                if token.revoke() {
+                    return true;
+                }
+                // Our token has already been popped of the queue and we are about to be woken
+                token.inner().park();
                 return true;
             }
             let was_woken = token.inner().park_until(timeout);
@@ -246,6 +256,9 @@ where
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.did_finish {
+            return Poll::Ready(());
+        }
         let this = unsafe { self.get_unchecked_mut() };
         if this.initialised {
             let mut inner_state = this.list_token.inner().get_state();
@@ -274,6 +287,9 @@ where
         if did_push {
             if !(this.should_sleep)() {
                 this.did_finish = true;
+                if !pinned_token.revoke() {
+                    return Poll::Pending;
+                }
                 return Poll::Ready(());
             }
             Poll::Pending

@@ -102,7 +102,6 @@ impl RawMutex {
 
     const fn conditional_notify(&self) -> impl Fn(usize) -> bool + '_ {
         |num_waiters_left| {
-            return true;
             let state = self.state.load(Ordering::Relaxed);
             if num_waiters_left == 1 && state & LOCKED_BIT == 0 {
                 return true;
@@ -124,10 +123,13 @@ impl RawMutex {
             return;
         }
         // use try on wake rather than spin try on wake
-        // self.queue
-        //     .wait_while_async(self.should_sleep(), self.try_on_wake())
-        //     .await;
-        todo!()
+        self.queue
+            .wait_while_async(
+                self.should_register(),
+                self.should_sleep(),
+                self.try_on_wake(),
+            )
+            .await;
     }
 }
 
@@ -167,10 +169,10 @@ unsafe impl lock_api::RawMutex for RawMutex {
 
     #[inline]
     unsafe fn unlock(&self) {
-        let state = self.state.swap(WAIT_BIT, Ordering::Release);
-        // if state & WAIT_BIT == 0 {
-        //     return;
-        // }
+        let state = self.state.swap(0, Ordering::Release);
+        if state & WAIT_BIT == 0 {
+            return;
+        }
 
         self.queue.notify_if(self.conditional_notify(), || {});
     }
@@ -201,9 +203,12 @@ unsafe impl lock_api::RawMutexTimed for RawMutex {
         if self.try_lock_spin(&mut state) {
             return true;
         }
-        // self.queue
-        //     .wait_while_until(self.should_sleep(), self.spin_on_wake(), timeout)
-        todo!()
+        self.queue.wait_while_until(
+            self.should_register(),
+            self.should_sleep(),
+            self.spin_on_wake(),
+            timeout,
+        )
     }
 }
 
