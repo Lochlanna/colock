@@ -1,5 +1,6 @@
 mod atomic_const_ptr;
 mod spin_lock;
+mod mini_lock;
 
 use crate::event::maybe_ref::MaybeRef;
 use atomic_const_ptr::AtomicConstPtr;
