@@ -1,21 +1,96 @@
+mod atomic_const_ptr;
+mod spin_lock;
+
 use crate::event::maybe_ref::MaybeRef;
+use atomic_const_ptr::AtomicConstPtr;
 use core::cell::Cell;
 use core::fmt::{Debug, Formatter};
 use core::pin::Pin;
-
-/// Outer container for intrusive linked list. Proxies calls to the inner list
-/// through the spin lock
-#[derive(Debug)]
-pub struct IntrusiveLinkedList<T> {
-    inner: spin::Mutex<IntrusiveLinkedListInner<T>>,
+use spin_lock::{SpinGuard, SpinLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+struct ProtectedListData<T> {
+    tail: *const Node<T>,
+    length: usize,
 }
 
-unsafe impl<T> Sync for IntrusiveLinkedList<T> {}
+impl<T> ProtectedListData<T> {
+    const fn new() -> Self {
+        Self {
+            tail: core::ptr::null(),
+            length: 0,
+        }
+    }
+}
+
+pub struct IntrusiveLinkedList<T> {
+    head: AtomicConstPtr<Node<T>>,
+    protected: SpinLock<ProtectedListData<T>>,
+}
+
+unsafe impl<T> Send for IntrusiveLinkedList<T> {}
+
 impl<T> IntrusiveLinkedList<T> {
     pub const fn new() -> Self {
         Self {
-            inner: spin::Mutex::new(IntrusiveLinkedListInner::new()),
+            head: AtomicConstPtr::new(core::ptr::null()),
+            protected: SpinLock::new(ProtectedListData::new()),
         }
+    }
+
+    fn back_fill_old(&self, guard: &mut SpinGuard<ProtectedListData<T>>) -> *const Node<T> {
+        let head = self.head.load(Ordering::Acquire);
+        if head.is_null() {
+            return head;
+        }
+        if guard.length == 0 {
+            guard.length = 1;
+        }
+        let mut current = unsafe { (*head).next.get() };
+        let mut prev = head;
+        while !current.is_null() {
+            let current_ref = unsafe { &*current };
+            if !current_ref.prev.get().is_null() {
+                break;
+            }
+            guard.length += 1;
+            current_ref.prev.set(prev);
+            prev = current;
+            current = current_ref.next.get();
+        }
+        if guard.tail.is_null() {
+            guard.tail = prev;
+        }
+
+        head
+    }
+
+    fn back_fill(&self, guard: &mut SpinGuard<ProtectedListData<T>>) -> *const Node<T> {
+        let head = self.head.load(Ordering::Acquire);
+        if head.is_null() {
+            debug_assert_eq!(guard.length, 0);
+            return head;
+        }
+        let mut current = unsafe { (*head).next.get() };
+        let mut prev: *const Node<T> = head;
+        let mut count = 0;
+        while !current.is_null() {
+            let current_ref = unsafe { &*current };
+            if !current_ref.prev.get().is_null() {
+                break;
+            }
+            count += 1;
+            current_ref.prev.set(prev);
+            prev = current;
+            current = current_ref.next.get();
+        }
+        if guard.tail.is_null() {
+            guard.tail = prev;
+            guard.length = count + 1;
+        } else {
+            guard.length += count;
+        }
+
+        head
     }
 
     /// Pops the tail from the list if the condition is true
@@ -29,8 +104,25 @@ impl<T> IntrusiveLinkedList<T> {
         condition: impl FnOnce(&T, usize) -> Option<R>,
         on_empty: impl FnOnce(),
     ) -> Option<R> {
-        let mut inner = self.inner.lock();
-        inner.pop_if(condition, on_empty)
+        let mut guard = self
+            .protected
+            .try_lock_while(|| !self.head.load(Ordering::Relaxed).is_null())?;
+        let head = self.back_fill(&mut guard);
+        if head.is_null() {
+            //it's empty!
+            debug_assert_eq!(guard.length, 0);
+            on_empty();
+            return None;
+        }
+        unsafe {
+            let tail = &*guard.tail;
+            debug_assert!(tail.is_on_queue.load(Ordering::Relaxed));
+            let ret = condition(&tail.data, guard.length);
+            ret.as_ref()?;
+            tail.remove(self, &mut guard);
+            debug_assert!(!tail.is_on_queue.load(Ordering::Relaxed));
+            ret
+        }
     }
 
     /// Create a new node object.
@@ -53,7 +145,9 @@ impl<T> IntrusiveLinkedList<T> {
     }
 
     pub fn len(&self) -> usize {
-        self.inner.lock().len()
+        let mut guard = self.protected.lock();
+        self.back_fill(&mut guard);
+        guard.length
     }
 }
 
@@ -62,77 +156,9 @@ where
     T: Clone,
 {
     pub fn to_vec(&self) -> Vec<T> {
-        self.inner.lock().to_vec()
-    }
-
-    /// helper function that pops the tail and clones it
-    fn pop_clone(&self) -> Option<T> {
-        self.inner.lock().pop_if(|v, _| Some(v.clone()), || {})
-    }
-}
-
-struct IntrusiveLinkedListInner<T> {
-    head: *const Node<T>,
-    tail: *const Node<T>,
-    length: usize,
-}
-
-unsafe impl<T> Send for IntrusiveLinkedListInner<T> {}
-
-impl<T> IntrusiveLinkedListInner<T> {
-    const fn new() -> Self {
-        Self {
-            head: core::ptr::null(),
-            length: 0,
-            tail: core::ptr::null(),
-        }
-    }
-
-    /// Pops the tail from the list if the condition is true
-    /// note that this function does return the value that was popped.
-    /// It does however return a value from the condition check.
-    /// This condition check is where the popped value can be used.
-    /// If the popped value needs to be recovered from the list it should be cloned and
-    /// returned from the condition check.
-    fn pop_if<R>(
-        &mut self,
-        condition: impl FnOnce(&T, usize) -> Option<R>,
-        on_empty: impl FnOnce(),
-    ) -> Option<R> {
-        if self.head.is_null() {
-            //it's empty!
-            debug_assert_eq!(self.length, 0);
-            on_empty();
-            return None;
-        }
-        unsafe {
-            let tail = &*self.tail;
-            debug_assert!(tail.is_on_queue.get());
-            let ret = condition(&tail.data, self.length);
-            ret.as_ref()?;
-            tail.remove(self);
-            debug_assert!(!tail.is_on_queue.get());
-            ret
-        }
-    }
-
-    const fn len(&self) -> usize {
-        self.length
-    }
-}
-
-impl<T> IntrusiveLinkedListInner<T>
-where
-    T: Clone,
-{
-    /// helper function that clones the items from the list into a vector.
-    /// Items are cloned from the head first.
-    fn to_vec(&self) -> Vec<T> {
+        let _guard = self.protected.lock();
         let mut data = Vec::new();
-        if self.head.is_null() {
-            return data;
-        }
-        let mut current = self.head;
+        let mut current = self.head.load(Ordering::Acquire);
         while !current.is_null() {
             let current_ref = unsafe { &*current };
             data.push(current_ref.data.clone());
@@ -140,21 +166,28 @@ where
         }
         data
     }
+
+    /// helper function that pops the tail and clones it
+    fn pop_clone(&self) -> Option<T> {
+        self.pop_if(|v, _| Some(v.clone()), || {})
+    }
 }
 
 #[allow(clippy::missing_fields_in_debug)]
-impl<T> Debug for IntrusiveLinkedListInner<T>
+impl<T> Debug for IntrusiveLinkedList<T>
 where
     T: Debug,
 {
     /// An unconventional debug implementation but it's much more useful for debugging
     /// than simply printing the pointer values
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if self.head.is_null() {
+        let mut guard = self.protected.lock();
+        let head = self.back_fill(&mut guard);
+        if head.is_null() {
             return f.debug_struct("IntrusiveLinkedList").finish();
         }
         let mut output = String::from("IntrusiveLinkedList [");
-        let mut current = self.head;
+        let mut current = head;
         let mut next_str = String::from("\n");
         while !current.is_null() {
             let current_ref = unsafe { &*current };
@@ -182,7 +215,7 @@ where
 pub struct Node<T> {
     next: Cell<*const Node<T>>,
     prev: Cell<*const Node<T>>,
-    is_on_queue: Cell<bool>,
+    is_on_queue: AtomicBool,
     data: T,
 }
 
@@ -193,86 +226,107 @@ impl<T> Node<T> {
         Self {
             next: Cell::new(core::ptr::null()),
             prev: Cell::new(core::ptr::null()),
-            is_on_queue: Cell::new(false),
+            is_on_queue: AtomicBool::new(false),
             data,
         }
     }
 
     /// helper method to unconditionally push the node to the front of the queue
-    fn push(&self, queue: &mut IntrusiveLinkedListInner<T>) {
+    fn push(&self, queue: &IntrusiveLinkedList<T>) {
         self.push_if(queue, || true);
     }
 
-    fn push_if(
-        &self,
-        queue: &mut IntrusiveLinkedListInner<T>,
-        condition: impl FnOnce() -> bool,
-    ) -> bool {
-        if !condition() {
-            debug_assert!(!self.is_on_queue.get());
-            return false;
-        }
+    fn push_if(&self, queue: &IntrusiveLinkedList<T>, condition: impl Fn() -> bool) -> bool {
+        self.is_on_queue.store(true, Ordering::Relaxed);
 
         self.prev.set(core::ptr::null());
-        self.next.set(queue.head);
-        if queue.head.is_null() {
-            // This will be the only item in the list and is therefore also the tail
-            queue.tail = self;
-        } else {
-            let head_ref = unsafe { &*queue.head };
-            head_ref.prev.set(self);
+
+        let mut current_head = queue.head.load(Ordering::Acquire);
+        while condition() {
+            self.next.set(current_head);
+            if let Err(new_head) = queue.head.compare_exchange_weak(
+                current_head,
+                self,
+                Ordering::Release,
+                Ordering::Acquire,
+            ) {
+                current_head = new_head;
+            } else {
+                return true;
+            }
         }
-        queue.head = self;
-        self.is_on_queue.set(true);
 
-        queue.length += 1;
-
-        true
+        self.is_on_queue.store(false, Ordering::Relaxed);
+        false
     }
 
     /// If the node is on the queue it will be removed and true will be returned.
     /// If the node wasn't already on the queue false will be returned.
-    fn revoke(&self, queue: &mut IntrusiveLinkedListInner<T>) -> bool {
-        if !self.is_on_queue.replace(false) {
+    fn revoke(&self, queue: &IntrusiveLinkedList<T>) -> bool {
+        if !self.is_on_queue.load(Ordering::Acquire) {
             return false;
         }
-        self.remove(queue);
+        let guard = queue
+            .protected
+            .try_lock_while(|| !queue.head.load(Ordering::Relaxed).is_null());
+        let Some(mut guard) = guard else {
+            debug_assert!(!self.is_on_queue.load(Ordering::Relaxed));
+            return false;
+        };
+        if !self.is_on_queue.load(Ordering::Relaxed) {
+            return false;
+        }
+        queue.back_fill(&mut guard);
+        self.remove(queue, &mut guard);
         true
     }
 
     /// Removes the node from the queue.
-    fn remove(&self, queue: &mut IntrusiveLinkedListInner<T>) {
-        queue.length -= 1;
+    fn remove(&self, queue: &IntrusiveLinkedList<T>, guard: &mut SpinGuard<ProtectedListData<T>>) {
+        guard.length -= 1;
 
-        if self.prev.get().is_null() {
-            // This is the head
-            let next = self.next.get();
-            if let Some(next) = unsafe { next.as_ref() } {
-                next.prev.set(core::ptr::null());
+        loop {
+            if self.prev.get().is_null() {
+                // This is the head
+                let next = self.next.get();
+                if queue
+                    .head
+                    .compare_exchange(self, next, Ordering::Release, Ordering::Relaxed)
+                    .is_err()
+                {
+                    //we are no longer the head!
+                    queue.back_fill(guard);
+                    continue;
+                }
+
+                if let Some(next) = unsafe { next.as_ref() } {
+                    next.prev.set(core::ptr::null());
+                } else {
+                    // This is also the tail (only item in the list)
+                    debug_assert_eq!(guard.tail, self as *const _);
+                    guard.tail = core::ptr::null();
+                }
+            } else if self.next.get().is_null() {
+                // This is the tail
+                debug_assert_eq!(guard.tail, self as *const _);
+                debug_assert!(!self.prev.get().is_null());
+                let prev = unsafe { &*self.prev.get() };
+                prev.next.set(core::ptr::null());
+                guard.tail = prev;
             } else {
-                // This is also the tail (only item in the list)
-                debug_assert_eq!(queue.tail, self as *const _);
-                queue.tail = core::ptr::null();
+                // This is in the middle somewhere
+                let prev = unsafe { &*self.prev.get() };
+                let next = unsafe { &*self.next.get() };
+                next.prev.set(prev);
+                prev.next.set(next);
             }
-            queue.head = next;
-        } else if self.next.get().is_null() {
-            // This is the tail
-            debug_assert_eq!(queue.tail, self as *const _);
-            let prev = unsafe { &*self.prev.get() };
-            prev.next.set(core::ptr::null());
-            queue.tail = prev;
-        } else {
-            // This is in the middle somewhere
-            let prev = unsafe { &*self.prev.get() };
-            let next = unsafe { &*self.next.get() };
-            next.prev.set(prev);
-            prev.next.set(next);
+
+            self.next.set(core::ptr::null());
+            self.prev.set(core::ptr::null());
+
+            self.is_on_queue.store(false, Ordering::Relaxed);
+            return;
         }
-
-        self.next.set(core::ptr::null());
-        self.prev.set(core::ptr::null());
-
-        self.is_on_queue.set(false);
     }
 }
 
@@ -300,9 +354,8 @@ impl<T> ListToken<'_, T> {
     }
 
     /// Conditionally push the node onto the front of the queue.
-    pub fn push_if(self: Pin<&Self>, condition: impl FnOnce() -> bool) -> bool {
-        let mut queue = self.queue.inner.lock();
-        self.node.push_if(&mut queue, condition)
+    pub fn push_if(self: Pin<&Self>, condition: impl Fn() -> bool) -> bool {
+        self.node.push_if(self.queue, condition)
     }
 
     /// Revoke the node from the queue.
@@ -310,8 +363,7 @@ impl<T> ListToken<'_, T> {
     /// Returns true if the node was on the queue and was revoked.
     /// Returns false if the node was not on the queue.
     pub fn revoke(&self) -> bool {
-        let mut queue = self.queue.inner.lock();
-        self.node.revoke(&mut queue)
+        self.node.revoke(self.queue)
     }
 
     /// Access the inner value of the node.
@@ -344,11 +396,8 @@ mod tests {
         let ill = IntrusiveLinkedList::new();
         let node_a = Node::new(42);
         let node_b = Node::new(32);
-        {
-            let mut ill_lock = ill.inner.lock();
-            node_a.push(&mut ill_lock);
-            node_b.push(&mut ill_lock);
-        }
+        node_a.push(&ill);
+        node_b.push(&ill);
         debug_assert_eq!(ill.pop_clone(), Some(42));
         debug_assert_eq!(ill.pop_clone(), Some(32));
     }
@@ -573,7 +622,7 @@ mod tests {
 
     #[test]
     fn pipe_test_miri() {
-        let num_elements = 50;
+        let num_elements = 100;
         let num_senders = 2;
         let num_receivers = 2;
         do_pipe_test(num_elements, num_senders, num_receivers);
