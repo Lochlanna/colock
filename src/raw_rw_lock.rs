@@ -93,8 +93,9 @@ unsafe impl lock_api::RawRwLock for RawRWLock {
             return;
         }
         // we failed to grab the lock, so we need to wait
-        self.read_queue
-            .wait_while(self.conditional_register_shared(), self.on_wake_shared())
+        // self.read_queue
+        //     .wait_while(self.conditional_register_shared(), self.on_wake_shared())
+        todo!()
     }
 
     fn try_lock_shared(&self) -> bool {

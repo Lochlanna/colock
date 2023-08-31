@@ -10,6 +10,7 @@ use intrusive_list::{IntrusiveLinkedList, ListToken, Node};
 use parker::Parker;
 use std::cell::Cell;
 use std::pin::{pin, Pin};
+use std::sync::atomic::{fence, Ordering};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -78,14 +79,21 @@ impl Event {
         false
     }
 
-    pub const fn wait_while_async<S, W>(&self, will_sleep: S, on_wake: W) -> Poller<'_, S, W>
+    pub const fn wait_while_async<R, S, W>(
+        &self,
+        should_register: R,
+        should_sleep: S,
+        on_wake: W,
+    ) -> Poller<'_, R, S, W>
     where
+        R: Fn() -> bool + Send,
         S: Fn() -> bool + Send,
         W: Fn() -> bool + Send,
     {
         Poller {
             event: self,
-            will_sleep,
+            should_register,
+            should_sleep,
             on_wake,
             list_token: self
                 .inner
@@ -96,7 +104,7 @@ impl Event {
     }
 
     pub fn wait_once(&self, will_sleep: impl Fn() -> bool) {
-        self.wait_while(will_sleep, || false);
+        self.wait_while(&will_sleep, &will_sleep, || false);
     }
 
     fn get_thread_token(&self) -> ListToken<Parker> {
@@ -109,11 +117,19 @@ impl Event {
         })
     }
 
-    pub fn wait_while(&self, should_sleep: impl Fn() -> bool, on_wake: impl Fn() -> bool) {
+    pub fn wait_while(
+        &self,
+        should_register: impl Fn() -> bool,
+        should_sleep: impl Fn() -> bool,
+        on_wake: impl Fn() -> bool,
+    ) {
         let token = pin!(self.get_thread_token());
 
         token.inner().prepare_park();
-        while token.as_ref().push_if(&should_sleep) {
+        while token.as_ref().push_if(&should_register) {
+            if !should_sleep() {
+                return;
+            }
             token.inner().park();
             debug_assert_eq!(token.inner().get_state(), State::Notified);
             if !on_wake() {
@@ -125,6 +141,7 @@ impl Event {
 
     pub fn wait_while_until(
         &self,
+        should_register: impl Fn() -> bool,
         should_sleep: impl Fn() -> bool,
         on_wake: impl Fn() -> bool,
         timeout: Instant,
@@ -134,13 +151,13 @@ impl Event {
         let did_time_out = Cell::new(false);
 
         // extend the will sleep function with timeout check code
-        let will_sleep = || {
+        let should_register = || {
             let now = Instant::now();
             if now >= timeout {
                 did_time_out.set(true);
                 return false;
             }
-            should_sleep()
+            should_register()
         };
 
         if Instant::now() >= timeout {
@@ -148,7 +165,10 @@ impl Event {
         }
 
         token.inner().prepare_park();
-        while token.as_ref().push_if(will_sleep) {
+        while token.as_ref().push_if(should_register) {
+            if !should_sleep() {
+                return true;
+            }
             let was_woken = token.inner().park_until(timeout);
             if !was_woken {
                 //TODO it should be possible to test this using a similar method to the async abort
@@ -176,28 +196,32 @@ impl Event {
     }
 }
 
-pub struct Poller<'a, S, W>
+pub struct Poller<'a, R, S, W>
 where
+    R: Fn() -> bool + Send,
     S: Fn() -> bool + Send,
     W: Fn() -> bool + Send,
 {
     event: &'a Event,
-    will_sleep: S,
+    should_register: R,
+    should_sleep: S,
     on_wake: W,
     list_token: ListToken<'a, Parker>,
     did_finish: bool,
     initialised: bool,
 }
 
-unsafe impl<S, W> Send for Poller<'_, S, W>
+unsafe impl<R, S, W> Send for Poller<'_, R, S, W>
 where
+    R: Fn() -> bool + Send,
     S: Fn() -> bool + Send,
     W: Fn() -> bool + Send,
 {
 }
 
-impl<S, W> Drop for Poller<'_, S, W>
+impl<R, S, W> Drop for Poller<'_, R, S, W>
 where
+    R: Fn() -> bool + Send,
     S: Fn() -> bool + Send,
     W: Fn() -> bool + Send,
 {
@@ -213,8 +237,9 @@ where
     }
 }
 
-impl<S, W> core::future::Future for Poller<'_, S, W>
+impl<R, S, W> core::future::Future for Poller<'_, R, S, W>
 where
+    R: Fn() -> bool + Send,
     S: Fn() -> bool + Send,
     W: Fn() -> bool + Send,
 {
@@ -245,8 +270,12 @@ where
 
         let pinned_token = unsafe { Pin::new_unchecked(&this.list_token) };
         pinned_token.inner().prepare_park();
-        let did_push = pinned_token.push_if(&this.will_sleep);
+        let did_push = pinned_token.push_if(&this.should_register);
         if did_push {
+            if !(this.should_sleep)() {
+                this.did_finish = true;
+                return Poll::Ready(());
+            }
             Poll::Pending
         } else {
             this.did_finish = true;
@@ -279,7 +308,7 @@ mod tests {
             });
             assert!(!test_val.load(Ordering::SeqCst));
             barrier.wait();
-            event.wait_while(|| true, || false);
+            event.wait_while(|| true, || true, || false);
             assert!(test_val.load(Ordering::SeqCst));
         });
     }
@@ -300,7 +329,7 @@ mod tests {
             s.spawn(async {
                 assert!(!test_val.load(Ordering::SeqCst));
                 barrier.wait().await;
-                event.wait_while_async(|| true, || false).await;
+                event.wait_while_async(|| true, || true, || false).await;
                 assert!(test_val.load(Ordering::SeqCst));
             });
         });
@@ -313,7 +342,7 @@ mod tests {
     async fn cancel_async() {
         let event = Event::new();
         {
-            let poller = pin!(event.wait_while_async(|| true, || false));
+            let poller = pin!(event.wait_while_async(|| true, || true, || false));
             let mut polling = poller.polling();
             let result = polling.poll_once().await;
             assert_eq!(result, Poll::Pending);
@@ -332,7 +361,7 @@ mod tests {
         let second_entry;
         let mut second_polling;
         {
-            let poller = pin!(event.wait_while_async(|| true, || false));
+            let poller = pin!(event.wait_while_async(|| true, || true, || false));
             let mut polling = poller.polling();
             let result = polling.poll_once().await;
             assert_eq!(result, Poll::Pending);
@@ -340,7 +369,7 @@ mod tests {
             event
                 .inner
                 .pop_if(|_, _| Some(()), || panic!("shouldn't be empty"));
-            second_entry = Box::pin(event.wait_while_async(|| true, || false));
+            second_entry = Box::pin(event.wait_while_async(|| true, || true, || false));
             second_polling = second_entry.polling();
             let result = second_polling.poll_once().await;
             assert_eq!(result, Poll::Pending);
@@ -361,7 +390,7 @@ mod tests {
                 let barrier = barrier.clone();
                 thread::spawn(move || {
                     barrier.wait();
-                    event.wait_while(|| true, || false);
+                    event.wait_while(|| true, || true, || false);
                 })
             })
             .collect_vec();

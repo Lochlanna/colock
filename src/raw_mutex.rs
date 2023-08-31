@@ -1,6 +1,7 @@
 use crate::event::Event;
 use crate::spinwait;
 use core::sync::atomic::{AtomicU8, Ordering};
+use lock_api::RawMutex as RawMutexApi;
 use std::time::Instant;
 
 const LOCKED_BIT: u8 = 1;
@@ -59,34 +60,29 @@ impl RawMutex {
         false
     }
 
+    const fn should_register(&self) -> impl Fn() -> bool + '_ {
+        || !self.try_lock()
+    }
+
+    // Set the wait bit
     const fn should_sleep(&self) -> impl Fn() -> bool + '_ {
         || {
-            let mut state = self.state.load(Ordering::Relaxed);
-            loop {
-                let (target, ordering) = match state {
-                    0 => (LOCKED_BIT, Ordering::Acquire),
-                    LOCKED_BIT => (LOCKED_BIT | WAIT_BIT, Ordering::Relaxed),
-                    WAIT_BIT => (LOCKED_BIT | WAIT_BIT, Ordering::Acquire),
-                    _ => {
-                        // locked and waiting / fair unlock
-                        return true;
-                    }
-                };
-                match self
-                    .state
-                    .compare_exchange_weak(state, target, ordering, Ordering::Relaxed)
-                {
-                    Ok(_) => {
-                        if state & LOCKED_BIT == 0 {
-                            // we got the lock!
-                            return false;
-                        }
-                        // we registered to wait!
-                        return true;
-                    }
-                    Err(new_state) => state = new_state,
+            let mut state = LOCKED_BIT;
+            let mut target = LOCKED_BIT | WAIT_BIT;
+            while let Err(new_state) = self.state.compare_exchange_weak(
+                state,
+                target,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                state = new_state;
+                match state {
+                    0 => target = LOCKED_BIT,
+                    LOCKED_AND_WAITING => return true,
+                    _ => target = LOCKED_AND_WAITING,
                 }
             }
+            state & LOCKED_BIT != 0
         }
     }
 
@@ -106,15 +102,13 @@ impl RawMutex {
 
     const fn conditional_notify(&self) -> impl Fn(usize) -> bool + '_ {
         |num_waiters_left| {
+            return true;
             let state = self.state.load(Ordering::Relaxed);
-            if state & LOCKED_BIT != 0 {
-                //the lock has already been locked by someone else don't bother waking a thread
-                return false;
+            if num_waiters_left == 1 && state & LOCKED_BIT == 0 {
+                return true;
             }
-            if num_waiters_left == 1 {
-                self.state.fetch_and(!WAIT_BIT, Ordering::Relaxed);
-            }
-            true
+            let state = self.state.fetch_or(WAIT_BIT, Ordering::SeqCst);
+            state & LOCKED_BIT == 0
         }
     }
 
@@ -130,9 +124,10 @@ impl RawMutex {
             return;
         }
         // use try on wake rather than spin try on wake
-        self.queue
-            .wait_while_async(self.should_sleep(), self.try_on_wake())
-            .await;
+        // self.queue
+        //     .wait_while_async(self.should_sleep(), self.try_on_wake())
+        //     .await;
+        todo!()
     }
 }
 
@@ -152,8 +147,11 @@ unsafe impl lock_api::RawMutex for RawMutex {
         if self.try_lock_spin(&mut state) {
             return;
         }
-        self.queue
-            .wait_while(self.should_sleep(), self.spin_on_wake());
+        self.queue.wait_while(
+            self.should_register(),
+            self.should_sleep(),
+            self.spin_on_wake(),
+        );
     }
 
     #[inline]
@@ -169,10 +167,10 @@ unsafe impl lock_api::RawMutex for RawMutex {
 
     #[inline]
     unsafe fn unlock(&self) {
-        let state = self.state.fetch_and(!LOCKED_BIT, Ordering::Release);
-        if state & WAIT_BIT == 0 {
-            return;
-        }
+        let state = self.state.swap(WAIT_BIT, Ordering::Release);
+        // if state & WAIT_BIT == 0 {
+        //     return;
+        // }
 
         self.queue.notify_if(self.conditional_notify(), || {});
     }
@@ -203,8 +201,9 @@ unsafe impl lock_api::RawMutexTimed for RawMutex {
         if self.try_lock_spin(&mut state) {
             return true;
         }
-        self.queue
-            .wait_while_until(self.should_sleep(), self.spin_on_wake(), timeout)
+        // self.queue
+        //     .wait_while_until(self.should_sleep(), self.spin_on_wake(), timeout)
+        todo!()
     }
 }
 

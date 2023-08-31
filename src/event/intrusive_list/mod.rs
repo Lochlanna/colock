@@ -37,35 +37,8 @@ impl<T> IntrusiveLinkedList<T> {
         }
     }
 
-    fn back_fill_old(&self, guard: &mut SpinGuard<ProtectedListData<T>>) -> *const Node<T> {
-        let head = self.head.load(Ordering::Acquire);
-        if head.is_null() {
-            return head;
-        }
-        if guard.length == 0 {
-            guard.length = 1;
-        }
-        let mut current = unsafe { (*head).next.get() };
-        let mut prev = head;
-        while !current.is_null() {
-            let current_ref = unsafe { &*current };
-            if !current_ref.prev.get().is_null() {
-                break;
-            }
-            guard.length += 1;
-            current_ref.prev.set(prev);
-            prev = current;
-            current = current_ref.next.get();
-        }
-        if guard.tail.is_null() {
-            guard.tail = prev;
-        }
-
-        head
-    }
-
     fn back_fill(&self, guard: &mut SpinGuard<ProtectedListData<T>>) -> *const Node<T> {
-        let head = self.head.load(Ordering::Acquire);
+        let head = self.head.load(Ordering::SeqCst);
         if head.is_null() {
             debug_assert_eq!(guard.length, 0);
             return head;
@@ -104,9 +77,8 @@ impl<T> IntrusiveLinkedList<T> {
         condition: impl FnOnce(&T, usize) -> Option<R>,
         on_empty: impl FnOnce(),
     ) -> Option<R> {
-        let mut guard = self
-            .protected
-            .try_lock_while(|| !self.head.load(Ordering::Relaxed).is_null())?;
+        let mut guard = self.protected.lock();
+        // println!("on pop: {}", self.internal_fmt(&mut guard));
         let head = self.back_fill(&mut guard);
         if head.is_null() {
             //it's empty!
@@ -118,6 +90,7 @@ impl<T> IntrusiveLinkedList<T> {
             let tail = &*guard.tail;
             debug_assert!(tail.is_on_queue.load(Ordering::Relaxed));
             let ret = condition(&tail.data, guard.length);
+            // println!("will pop {:?}", ret.is_some());
             ret.as_ref()?;
             tail.remove(self, &mut guard);
             debug_assert!(!tail.is_on_queue.load(Ordering::Relaxed));
@@ -151,6 +124,27 @@ impl<T> IntrusiveLinkedList<T> {
     }
 }
 
+impl<T> IntrusiveLinkedList<T> {
+    fn internal_fmt(&self, guard: &mut SpinGuard<ProtectedListData<T>>) -> String {
+        let head = self.back_fill(guard);
+        if head.is_null() {
+            return "Intrusive Linked List []".into();
+        }
+        let mut output = String::from("IntrusiveLinkedList [");
+        let mut current = head;
+        let mut next_str = String::from("\n");
+        while !current.is_null() {
+            let current_ref = unsafe { &*current };
+            next_str.push_str(format!("\t↑ {:?}\n", current_ref.prev.get()).as_str());
+            output.push_str(format!("{}{:?},", next_str, current_ref as *const _).as_str());
+            next_str = format!("\n\t↓ {:?}", current_ref.next.get());
+            current = current_ref.next.get();
+        }
+        output += next_str.as_str();
+        output.push_str("\n]");
+        output
+    }
+}
 impl<T> IntrusiveLinkedList<T>
 where
     T: Clone,
@@ -174,37 +168,12 @@ where
 }
 
 #[allow(clippy::missing_fields_in_debug)]
-impl<T> Debug for IntrusiveLinkedList<T>
-where
-    T: Debug,
-{
+impl<T> Debug for IntrusiveLinkedList<T> {
     /// An unconventional debug implementation but it's much more useful for debugging
     /// than simply printing the pointer values
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut guard = self.protected.lock();
-        let head = self.back_fill(&mut guard);
-        if head.is_null() {
-            return f.debug_struct("IntrusiveLinkedList").finish();
-        }
-        let mut output = String::from("IntrusiveLinkedList [");
-        let mut current = head;
-        let mut next_str = String::from("\n");
-        while !current.is_null() {
-            let current_ref = unsafe { &*current };
-            next_str.push_str(format!("\t↑ {:?}\n", current_ref.prev.get()).as_str());
-            output.push_str(
-                format!(
-                    "{}{:?} → {:?},",
-                    next_str, current_ref as *const _, current_ref
-                )
-                .as_str(),
-            );
-            next_str = format!("\n\t↓ {:?}", current_ref.next.get());
-            current = current_ref.next.get();
-        }
-        output += next_str.as_str();
-        output.push_str("\n]");
-        f.write_str(output.as_str())
+        f.write_str(self.internal_fmt(&mut guard).as_str())
     }
 }
 
@@ -247,8 +216,8 @@ impl<T> Node<T> {
             if let Err(new_head) = queue.head.compare_exchange_weak(
                 current_head,
                 self,
-                Ordering::Release,
-                Ordering::Acquire,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
             ) {
                 current_head = new_head;
             } else {
@@ -266,13 +235,7 @@ impl<T> Node<T> {
         if !self.is_on_queue.load(Ordering::Acquire) {
             return false;
         }
-        let guard = queue
-            .protected
-            .try_lock_while(|| !queue.head.load(Ordering::Relaxed).is_null());
-        let Some(mut guard) = guard else {
-            debug_assert!(!self.is_on_queue.load(Ordering::Relaxed));
-            return false;
-        };
+        let mut guard = queue.protected.lock();
         if !self.is_on_queue.load(Ordering::Relaxed) {
             return false;
         }
