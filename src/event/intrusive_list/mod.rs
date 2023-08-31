@@ -1,3 +1,5 @@
+mod mini_lock;
+
 use crate::event::maybe_ref::MaybeRef;
 use core::cell::Cell;
 use core::fmt::{Debug, Formatter};
@@ -5,16 +7,27 @@ use core::pin::Pin;
 
 /// Outer container for intrusive linked list. Proxies calls to the inner list
 /// through the spin lock
-#[derive(Debug)]
 pub struct IntrusiveLinkedList<T> {
-    inner: spin::Mutex<IntrusiveLinkedListInner<T>>,
+    inner: mini_lock::MiniLock<IntrusiveLinkedListInner<T>>,
+}
+
+impl<T> Debug for IntrusiveLinkedList<T>
+where
+    T: Debug,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let guard = self.inner.lock();
+        f.debug_struct("IntrusiveLinkedList")
+            .field("inner", &*guard)
+            .finish()
+    }
 }
 
 unsafe impl<T> Sync for IntrusiveLinkedList<T> {}
 impl<T> IntrusiveLinkedList<T> {
     pub const fn new() -> Self {
         Self {
-            inner: spin::Mutex::new(IntrusiveLinkedListInner::new()),
+            inner: mini_lock::MiniLock::new(IntrusiveLinkedListInner::new()),
         }
     }
 
