@@ -48,7 +48,7 @@ impl<T> MiniLock<T> {
             let target = node as *const _ as usize | (head & LOCKED_BIT);
             if let Err(new_head) =
                 self.head
-                    .compare_exchange_weak(head, target, Ordering::SeqCst, Ordering::Acquire)
+                    .compare_exchange_weak(head, target, Ordering::Release, Ordering::Relaxed)
             {
                 head = new_head;
             } else {
@@ -63,8 +63,8 @@ impl<T> MiniLock<T> {
         let Err(head) = self.head.compare_exchange(
             node_ptr as usize | LOCKED_BIT,
             node.next as usize | LOCKED_BIT,
-            Ordering::SeqCst,
-            Ordering::Acquire,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
         ) else {
             return;
         };
@@ -96,7 +96,7 @@ impl<T> MiniLock<T> {
             let next = head_ref.next as usize | LOCKED_BIT;
             if let Err(new_head) =
                 self.head
-                    .compare_exchange_weak(head, next, Ordering::SeqCst, Ordering::Acquire)
+                    .compare_exchange_weak(head, next, Ordering::Relaxed, Ordering::Relaxed)
             {
                 head = new_head;
             } else {
@@ -184,7 +184,7 @@ impl<T> MiniLock<T> {
     }
 
     pub fn is_locked(&self) -> bool {
-        self.head.load(Ordering::Acquire) & LOCKED_BIT == LOCKED_BIT
+        self.head.load(Ordering::Relaxed) & LOCKED_BIT == LOCKED_BIT
     }
 }
 
@@ -228,10 +228,10 @@ mod tests {
                 for _ in 0..num_iterations {
                     let guard = mutex.lock();
                     barrier.wait();
-                    while mutex.head.load(Ordering::SeqCst) & PTR_MASK == 0 {
+                    thread::sleep(Duration::from_millis(50));
+                    while mutex.head.load(Ordering::Relaxed) & PTR_MASK == 0 {
                         thread::yield_now();
                     }
-                    thread::sleep(Duration::from_millis(10));
                     drop(guard);
                     barrier.wait();
                 }
