@@ -1,3 +1,4 @@
+#[cfg(not(miri))]
 mod mini_lock;
 
 use crate::event::maybe_ref::MaybeRef;
@@ -5,8 +6,12 @@ use core::cell::Cell;
 use core::fmt::{Debug, Formatter};
 use core::pin::Pin;
 
+//TODO figure out a better solution than this
+
+#[cfg(not(miri))]
 use mini_lock::MiniLock as InnerLock;
-// use spin::mutex::Mutex as InnerLock;
+#[cfg(miri)]
+use spin::mutex::Mutex as InnerLock;
 
 /// Outer container for intrusive linked list. Proxies calls to the inner list
 /// through the spin lock
