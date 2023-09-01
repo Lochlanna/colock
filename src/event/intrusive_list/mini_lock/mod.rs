@@ -24,7 +24,7 @@ impl<T> IntrusiveLifo<T> {
         }
     }
     fn peak(&self) -> *const Node<T> {
-        self.head.load(Ordering::SeqCst)
+        self.head.load(Ordering::Acquire)
     }
 
     fn is_empty(&self) -> bool {
@@ -32,7 +32,7 @@ impl<T> IntrusiveLifo<T> {
     }
 
     unsafe fn pop(&self) -> Option<&'static Node<T>> {
-        let mut head = self.head.load(Ordering::SeqCst);
+        let mut head = self.head.load(Ordering::Acquire);
         loop {
             if head.is_null() {
                 return None;
@@ -41,7 +41,7 @@ impl<T> IntrusiveLifo<T> {
             let next = current.next.get();
             if let Err(new_head) =
                 self.head
-                    .compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
+                    .compare_exchange(current, next, Ordering::Acquire, Ordering::Relaxed)
             {
                 head = new_head;
                 continue;
@@ -70,13 +70,13 @@ where
         }
     }
     fn push(&self, queue: &IntrusiveLifo<T>) {
-        let mut head = queue.head.load(Ordering::SeqCst);
+        let mut head = queue.head.load(Ordering::Relaxed);
         loop {
             self.next.set(head);
             if let Err(new_head) =
                 queue
                     .head
-                    .compare_exchange_weak(head, self, Ordering::SeqCst, Ordering::SeqCst)
+                    .compare_exchange_weak(head, self, Ordering::Release, Ordering::Relaxed)
             {
                 head = new_head;
                 continue;
@@ -91,7 +91,7 @@ where
         let Err(mut current) =
             queue
                 .head
-                .compare_exchange(self, next, Ordering::SeqCst, Ordering::SeqCst)
+                .compare_exchange(self, next, Ordering::Acquire, Ordering::Relaxed)
         else {
             return;
         };
@@ -175,7 +175,7 @@ impl<T> MiniLock<T> {
     fn try_lock_weak(&self) -> Option<MiniLockGuard<T>> {
         if self
             .is_locked
-            .compare_exchange_weak(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
             return Some(MiniLockGuard { inner: self });
@@ -185,7 +185,7 @@ impl<T> MiniLock<T> {
 
     fn try_lock_internal(&self) -> bool {
         self.is_locked
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
     }
 
@@ -199,7 +199,7 @@ impl<T> MiniLock<T> {
                 return true;
             }
 
-            self.is_locked.store(false, Ordering::SeqCst);
+            self.is_locked.store(false, Ordering::Release);
 
             if self.queue.is_empty() {
                 // There is no one to wake up
@@ -214,7 +214,7 @@ impl<T> MiniLock<T> {
     }
 
     pub fn is_locked(&self) -> bool {
-        self.is_locked.load(Ordering::SeqCst)
+        self.is_locked.load(Ordering::Relaxed)
     }
 }
 
