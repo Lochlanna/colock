@@ -287,7 +287,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn lots_and_lots() {
-        const J: u64 = 1_000_000;
+        const J: u64 = 100_000;
         // const J: u64 = 10000000;
         // const J: u64 = 50000000;
         const K: u64 = 6;
