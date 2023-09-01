@@ -157,13 +157,11 @@ impl<T> MiniLock<T> {
 
         if let Some(guard) = self.try_lock() {
             unsafe { node.remove_from_queue(&self.queue) }
-            println!("a");
             return guard;
         }
 
         node.data.park();
         debug_assert!(self.is_locked());
-        println!("b");
         MiniLockGuard { inner: self }
     }
 
