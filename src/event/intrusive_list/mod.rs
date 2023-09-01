@@ -5,13 +5,11 @@ use core::cell::Cell;
 use core::fmt::{Debug, Formatter};
 use core::pin::Pin;
 
-//TODO figure out a better solution than this
-
+// Alias MiniLock to allow for testing with other lock implementations
 use mini_lock::MiniLock as InnerLock;
-// use spin::mutex::Mutex as InnerLock;
 
 /// Outer container for intrusive linked list. Proxies calls to the inner list
-/// through the spin lock
+/// through the inner lock
 pub struct IntrusiveLinkedList<T> {
     inner: InnerLock<IntrusiveLinkedListInner<T>>,
 }

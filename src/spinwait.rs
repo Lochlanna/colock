@@ -18,11 +18,11 @@ fn cpu_relax(iterations: u32) {
 
 /// A counter used to perform exponential backoff in spin loops.
 #[derive(Default)]
-pub struct SpinWait {
+pub struct SpinWait<const NUM_SPINS: u32, const NUM_YIELDS: u32> {
     counter: u32,
 }
 
-impl SpinWait {
+impl<const NUM_SPINS: u32, const NUM_YIELDS: u32> SpinWait<NUM_SPINS, NUM_YIELDS> {
     /// Creates a new `SpinWait`.
     #[inline]
     pub const fn new() -> Self {
@@ -45,12 +45,13 @@ impl SpinWait {
     /// to yielding the CPU to the OS after a few iterations.
     #[inline]
     pub fn spin(&mut self) -> bool {
-        if self.counter >= 10 {
+        if self.counter >= NUM_SPINS + NUM_YIELDS {
             return false;
         }
         self.counter += 1;
-        if self.counter <= 3 {
-            cpu_relax(1 << self.counter);
+        if self.counter <= NUM_SPINS {
+            let iterations = (1 << self.counter).min(1 << 3);
+            cpu_relax(iterations);
         } else {
             std::thread::yield_now();
         }
@@ -65,8 +66,8 @@ impl SpinWait {
     #[inline]
     pub fn spin_no_yield(&mut self) {
         self.counter += 1;
-        if self.counter > 10 {
-            self.counter = 10;
+        if self.counter > NUM_SPINS {
+            self.counter = NUM_SPINS;
         }
         cpu_relax(1 << self.counter);
     }

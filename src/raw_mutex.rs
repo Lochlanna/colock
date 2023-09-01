@@ -39,7 +39,7 @@ impl RawMutex {
 
     #[inline]
     fn try_lock_spin(&self, state: &mut u8) -> bool {
-        let mut spin_wait = spinwait::SpinWait::new();
+        let mut spin_wait = spinwait::SpinWait::<4, 6>::new();
         while spin_wait.spin() {
             if *state & LOCKED_BIT == 0 {
                 if let Err(new_state) = self.state.compare_exchange_weak(
