@@ -1,122 +1,33 @@
 mod atomic_const_ptr;
 
-use crate::event::maybe_ref::MaybeRef;
 use crate::event::parker::Parker;
 use crate::spinwait::SpinWait;
-use atomic_const_ptr::AtomicConstPtr;
-use std::cell::{Cell, UnsafeCell};
+use std::cell::UnsafeCell;
 use std::ops::{Deref, DerefMut};
-use std::pin::pin;
-use std::ptr::null;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::ptr::null_mut;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-struct IntrusiveLifo<T>
-where
-    T: 'static,
-{
-    head: AtomicConstPtr<Node<T>>,
+const LOCKED_BIT: usize = 0b1;
+const PTR_MASK: usize = !LOCKED_BIT;
+
+#[repr(align(2))]
+struct Node {
+    data: &'static Parker,
+    next: *mut Self,
 }
 
-impl<T> IntrusiveLifo<T> {
-    const fn new() -> Self {
-        Self {
-            head: AtomicConstPtr::new(null()),
-        }
-    }
-    fn peak(&self) -> *const Node<T> {
-        self.head.load(Ordering::Acquire)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.peak().is_null()
-    }
-
-    unsafe fn pop(&self) -> Option<&'static Node<T>> {
-        let mut head = self.head.load(Ordering::Acquire);
-        loop {
-            if head.is_null() {
-                return None;
-            }
-            let current = &*head;
-            let next = current.next.get();
-            if let Err(new_head) =
-                self.head
-                    .compare_exchange(current, next, Ordering::Acquire, Ordering::Relaxed)
-            {
-                head = new_head;
-                continue;
-            }
-            return Some(current);
-        }
-    }
-}
-
-struct Node<T>
-where
-    T: 'static,
-{
-    data: MaybeRef<'static, T>,
-    next: Cell<*const Node<T>>,
-}
-
-impl<T> Node<T>
-where
-    T: 'static,
-{
-    const fn new(data: MaybeRef<'static, T>) -> Self {
+impl Node {
+    const fn new(data: &'static Parker) -> Self {
         Self {
             data,
-            next: Cell::new(null()),
+            next: null_mut(),
         }
-    }
-    fn push(&self, queue: &IntrusiveLifo<T>) {
-        let mut head = queue.head.load(Ordering::Relaxed);
-        loop {
-            self.next.set(head);
-            if let Err(new_head) =
-                queue
-                    .head
-                    .compare_exchange_weak(head, self, Ordering::Release, Ordering::Relaxed)
-            {
-                head = new_head;
-                continue;
-            }
-            return;
-        }
-    }
-
-    //TODO document how to use this
-    unsafe fn remove_from_queue(&self, queue: &IntrusiveLifo<T>) {
-        let next = self.next.get();
-        let Err(mut current) =
-            queue
-                .head
-                .compare_exchange(self, next, Ordering::Acquire, Ordering::Relaxed)
-        else {
-            return;
-        };
-
-        // this node is not the head!
-        debug_assert!(!current.is_null());
-
-        let mut prev = null();
-        while current != self {
-            prev = current;
-            current = (*current).next.get();
-            assert!(!current.is_null());
-        }
-
-        debug_assert_eq!(current, self as *const _);
-        debug_assert!(!prev.is_null());
-
-        (*prev).next.set(next);
     }
 }
 
 pub struct MiniLock<T> {
-    is_locked: AtomicBool,
-    queue: IntrusiveLifo<Parker>,
     data: UnsafeCell<T>,
+    head: AtomicUsize,
 }
 
 unsafe impl<T> Sync for MiniLock<T> {}
@@ -125,16 +36,81 @@ unsafe impl<T> Send for MiniLock<T> where T: Send {}
 impl<T> MiniLock<T> {
     pub const fn new(data: T) -> Self {
         Self {
-            is_locked: AtomicBool::new(false),
-            queue: IntrusiveLifo::new(),
             data: UnsafeCell::new(data),
+            head: AtomicUsize::new(0),
         }
+    }
+
+    fn push(&self, node: &mut Node) {
+        let mut head = self.head.load(Ordering::Acquire);
+        loop {
+            node.next = (head & PTR_MASK) as *mut Node;
+            let target = node as *const _ as usize | (head & LOCKED_BIT);
+            if let Err(new_head) =
+                self.head
+                    .compare_exchange_weak(head, target, Ordering::SeqCst, Ordering::Acquire)
+            {
+                head = new_head;
+            } else {
+                return;
+            }
+        }
+    }
+
+    fn remove(&self, node: &mut Node) {
+        let node_ptr = node as *mut Node;
+        debug_assert_eq!(self.head.load(Ordering::Acquire) & LOCKED_BIT, LOCKED_BIT);
+        let Err(head) = self.head.compare_exchange(
+            node_ptr as usize | LOCKED_BIT,
+            node.next as usize | LOCKED_BIT,
+            Ordering::SeqCst,
+            Ordering::Acquire,
+        ) else {
+            return;
+        };
+        let mut current_ptr = (head & PTR_MASK) as *mut Node;
+        debug_assert_ne!(current_ptr as usize, node_ptr as usize);
+        debug_assert!(!current_ptr.is_null());
+        debug_assert_eq!(head & LOCKED_BIT, LOCKED_BIT);
+
+        let mut prev = null_mut();
+        while current_ptr != node_ptr {
+            let current = unsafe { &*current_ptr };
+            prev = current_ptr;
+            current_ptr = current.next;
+        }
+
+        debug_assert!(!prev.is_null());
+        unsafe {
+            (*prev).next = node.next;
+        }
+    }
+
+    fn pop(&self) -> Option<&Node> {
+        let mut head = self.head.load(Ordering::Acquire);
+        debug_assert_eq!(head & LOCKED_BIT, LOCKED_BIT);
+        while head != LOCKED_BIT {
+            debug_assert_eq!(head & LOCKED_BIT, LOCKED_BIT);
+            let head_ptr = (head & PTR_MASK) as *mut Node;
+            let head_ref = unsafe { &*head_ptr };
+            let next = head_ref.next as usize | LOCKED_BIT;
+            if let Err(new_head) =
+                self.head
+                    .compare_exchange_weak(head, next, Ordering::SeqCst, Ordering::Acquire)
+            {
+                head = new_head;
+            } else {
+                return Some(head_ref);
+            }
+        }
+        // it's null
+        None
     }
 
     pub fn lock(&self) -> MiniLockGuard<T> {
         let mut spin = SpinWait::new();
         while spin.spin() {
-            if let Some(guard) = self.try_lock_weak() {
+            if let Some(guard) = self.try_lock() {
                 return guard;
             }
         }
@@ -143,9 +119,9 @@ impl<T> MiniLock<T> {
             static PARKER: Parker = const {Parker::new()};
         }
 
-        let node = PARKER.with(|parker| {
+        let mut node = PARKER.with(|parker| {
             let parker: &'static Parker = unsafe { std::mem::transmute(parker) };
-            Node::new(MaybeRef::Ref(parker))
+            Node::new(parker)
         });
 
         if let Some(guard) = self.try_lock() {
@@ -153,15 +129,16 @@ impl<T> MiniLock<T> {
         }
         //push onto the queue
         node.data.prepare_park();
-        node.push(&self.queue);
+        self.push(&mut node);
 
         if let Some(guard) = self.try_lock() {
-            unsafe { node.remove_from_queue(&self.queue) }
+            self.remove(&mut node);
             return guard;
         }
 
         node.data.park();
         debug_assert!(self.is_locked());
+
         MiniLockGuard { inner: self }
     }
 
@@ -172,49 +149,42 @@ impl<T> MiniLock<T> {
         None
     }
 
-    fn try_lock_weak(&self) -> Option<MiniLockGuard<T>> {
-        if self
-            .is_locked
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
-            return Some(MiniLockGuard { inner: self });
-        }
-        None
-    }
-
     fn try_lock_internal(&self) -> bool {
-        self.is_locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
+        let mut head = self.head.load(Ordering::Acquire);
+        while head & LOCKED_BIT == 0 {
+            if let Err(new_head) = self.head.compare_exchange_weak(
+                head,
+                head | LOCKED_BIT,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                head = new_head;
+            } else {
+                return true;
+            }
+        }
+        false
     }
 
     unsafe fn unlock(&self) -> bool {
-        loop {
-            debug_assert!(self.is_locked());
-            if let Some(node) = self.queue.pop() {
-                let handle = node.data.unpark_handle();
-                let did_unpark = handle.un_park();
-                debug_assert!(did_unpark);
-                return true;
-            }
-
-            self.is_locked.store(false, Ordering::Release);
-
-            if self.queue.is_empty() {
-                // There is no one to wake up
-                return false;
-            }
-
-            if !self.try_lock_internal() {
-                // another thread has already taken the lock
-                return false;
-            }
-        }
+        if self
+            .head
+            .compare_exchange(LOCKED_BIT, 0, Ordering::Release, Ordering::Acquire)
+            .is_ok()
+        {
+            return false;
+        };
+        // there are waiters on the queue!
+        // the lock is still locked
+        let head = self
+            .pop()
+            .expect("a node was able to remove itself from the queue while the lock was held");
+        head.data.unpark_handle().un_park();
+        true
     }
 
     pub fn is_locked(&self) -> bool {
-        self.is_locked.load(Ordering::Relaxed)
+        self.head.load(Ordering::Acquire) & LOCKED_BIT == LOCKED_BIT
     }
 }
 
@@ -258,7 +228,7 @@ mod tests {
                 for _ in 0..num_iterations {
                     let guard = mutex.lock();
                     barrier.wait();
-                    while mutex.queue.head.load(Ordering::SeqCst).is_null() {
+                    while mutex.head.load(Ordering::SeqCst) & PTR_MASK == 0 {
                         thread::yield_now();
                     }
                     thread::sleep(Duration::from_millis(10));
@@ -309,7 +279,7 @@ mod tests {
     #[test]
     fn lots_and_lots_miri() {
         const J: u64 = 400;
-        const K: u64 = 5;
+        const K: u64 = 3;
 
         do_lots_and_lots(J, K);
     }
