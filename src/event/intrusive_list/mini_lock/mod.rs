@@ -6,31 +6,52 @@ use crate::spinwait::SpinWait;
 use atomic_const_ptr::AtomicConstPtr;
 use std::cell::{Cell, UnsafeCell};
 use std::ops::{Deref, DerefMut};
-use std::pin::{pin, Pin};
+use std::pin::pin;
 use std::ptr::null;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-pub struct IntrusiveLifo<T>
+struct IntrusiveLifo<T>
 where
     T: 'static,
 {
     head: AtomicConstPtr<Node<T>>,
-    crit_counter: AtomicUsize,
 }
 
 impl<T> IntrusiveLifo<T> {
     const fn new() -> Self {
         Self {
             head: AtomicConstPtr::new(null()),
-            crit_counter: AtomicUsize::new(0),
         }
     }
     fn peak(&self) -> *const Node<T> {
-        self.head.load(Ordering::Acquire)
+        self.head.load(Ordering::SeqCst)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.peak().is_null()
+    }
+
+    unsafe fn pop(&self) -> Option<&'static Node<T>> {
+        let mut head = self.head.load(Ordering::SeqCst);
+        loop {
+            if head.is_null() {
+                return None;
+            }
+            let current = &*head;
+            let next = current.next.get();
+            if let Err(new_head) =
+                self.head
+                    .compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                head = new_head;
+                continue;
+            }
+            return Some(current);
+        }
     }
 }
 
-pub struct Node<T>
+struct Node<T>
 where
     T: 'static,
 {
@@ -48,16 +69,15 @@ where
             next: Cell::new(null()),
         }
     }
-    fn push(self: Pin<&Self>, queue: &IntrusiveLifo<T>) {
-        let mut head = queue.head.load(Ordering::Relaxed);
+    fn push(&self, queue: &IntrusiveLifo<T>) {
+        let mut head = queue.head.load(Ordering::SeqCst);
         loop {
             self.next.set(head);
-            if let Err(new_head) = queue.head.compare_exchange_weak(
-                head,
-                self.get_ref(),
-                Ordering::Release,
-                Ordering::Relaxed,
-            ) {
+            if let Err(new_head) =
+                queue
+                    .head
+                    .compare_exchange_weak(head, self, Ordering::SeqCst, Ordering::SeqCst)
+            {
                 head = new_head;
                 continue;
             }
@@ -66,37 +86,30 @@ where
     }
 
     //TODO document how to use this
-    unsafe fn remove_from_queue(self: Pin<&Self>, queue: &IntrusiveLifo<T>) {
-        debug_assert_eq!(queue.crit_counter.fetch_add(1, Ordering::Acquire), 0);
-
-        let mut current = queue.head.load(Ordering::Acquire);
-        let self_ptr = self.get_ref() as *const _;
+    unsafe fn remove_from_queue(&self, queue: &IntrusiveLifo<T>) {
         let next = self.next.get();
-        if current == self_ptr {
-            if let Err(new_head) =
-                queue
-                    .head
-                    .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
-            {
-                current = new_head;
-            } else {
-                debug_assert_eq!(queue.crit_counter.fetch_sub(1, Ordering::Acquire), 1);
-                return;
-            }
-        }
+        let Err(mut current) =
+            queue
+                .head
+                .compare_exchange(self, next, Ordering::SeqCst, Ordering::SeqCst)
+        else {
+            return;
+        };
 
+        // this node is not the head!
         debug_assert!(!current.is_null());
 
         let mut prev = null();
-        while current != self_ptr {
+        while current != self {
             prev = current;
             current = (*current).next.get();
             assert!(!current.is_null());
         }
 
-        (*prev).next.set(next);
+        debug_assert_eq!(current, self as *const _);
+        debug_assert!(!prev.is_null());
 
-        debug_assert_eq!(queue.crit_counter.fetch_sub(1, Ordering::Acquire), 1);
+        (*prev).next.set(next);
     }
 }
 
@@ -130,38 +143,32 @@ impl<T> MiniLock<T> {
             static PARKER: Parker = const {Parker::new()};
         }
 
-        let node = pin!(PARKER.with(|parker| {
+        let node = PARKER.with(|parker| {
             let parker: &'static Parker = unsafe { std::mem::transmute(parker) };
             Node::new(MaybeRef::Ref(parker))
-        }));
+        });
 
         if let Some(guard) = self.try_lock() {
             return guard;
         }
         //push onto the queue
         node.data.prepare_park();
-        node.as_ref().push(&self.queue);
+        node.push(&self.queue);
 
         if let Some(guard) = self.try_lock() {
-            unsafe { node.as_ref().remove_from_queue(&self.queue) }
+            unsafe { node.remove_from_queue(&self.queue) }
+            println!("a");
             return guard;
         }
 
         node.data.park();
-
         debug_assert!(self.is_locked());
-
-        unsafe { node.as_ref().remove_from_queue(&self.queue) }
-
+        println!("b");
         MiniLockGuard { inner: self }
     }
 
     pub fn try_lock(&self) -> Option<MiniLockGuard<T>> {
-        if self
-            .is_locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
+        if self.try_lock_internal() {
             return Some(MiniLockGuard { inner: self });
         }
         None
@@ -170,7 +177,7 @@ impl<T> MiniLock<T> {
     fn try_lock_weak(&self) -> Option<MiniLockGuard<T>> {
         if self
             .is_locked
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange_weak(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
             return Some(MiniLockGuard { inner: self });
@@ -178,31 +185,38 @@ impl<T> MiniLock<T> {
         None
     }
 
-    unsafe fn unlock(&self) -> bool {
-        loop {
-            self.is_locked.store(false, Ordering::Release);
-            if !self.queue.peak().is_null() && self.try_lock_internal() {
-                debug_assert!(self.is_locked());
-                let node = self.queue.peak();
-                if node.is_null() {
-                    continue;
-                }
-                let did_unpark = (*node).data.unpark_handle().un_park();
-                debug_assert!(did_unpark);
-                return true;
-            }
-            return false;
-        }
-    }
-
     fn try_lock_internal(&self) -> bool {
         self.is_locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     }
 
+    unsafe fn unlock(&self) -> bool {
+        loop {
+            debug_assert!(self.is_locked());
+            if let Some(node) = self.queue.pop() {
+                let handle = node.data.unpark_handle();
+                let did_unpark = handle.un_park();
+                debug_assert!(did_unpark);
+                return true;
+            }
+
+            self.is_locked.store(false, Ordering::SeqCst);
+
+            if self.queue.is_empty() {
+                // There is no one to wake up
+                return false;
+            }
+
+            if !self.try_lock_internal() {
+                // another thread has already taken the lock
+                return false;
+            }
+        }
+    }
+
     pub fn is_locked(&self) -> bool {
-        self.is_locked.load(Ordering::Acquire)
+        self.is_locked.load(Ordering::SeqCst)
     }
 }
 
@@ -246,7 +260,7 @@ mod tests {
                 for _ in 0..num_iterations {
                     let guard = mutex.lock();
                     barrier.wait();
-                    while mutex.queue.head.load(Ordering::Acquire).is_null() {
+                    while mutex.queue.head.load(Ordering::SeqCst).is_null() {
                         thread::yield_now();
                     }
                     thread::sleep(Duration::from_millis(10));

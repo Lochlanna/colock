@@ -5,10 +5,13 @@ use core::cell::Cell;
 use core::fmt::{Debug, Formatter};
 use core::pin::Pin;
 
+use mini_lock::MiniLock as InnerLock;
+// use spin::mutex::Mutex as InnerLock;
+
 /// Outer container for intrusive linked list. Proxies calls to the inner list
 /// through the spin lock
 pub struct IntrusiveLinkedList<T> {
-    inner: mini_lock::MiniLock<IntrusiveLinkedListInner<T>>,
+    inner: InnerLock<IntrusiveLinkedListInner<T>>,
 }
 
 impl<T> Debug for IntrusiveLinkedList<T>
@@ -27,7 +30,7 @@ unsafe impl<T> Sync for IntrusiveLinkedList<T> {}
 impl<T> IntrusiveLinkedList<T> {
     pub const fn new() -> Self {
         Self {
-            inner: mini_lock::MiniLock::new(IntrusiveLinkedListInner::new()),
+            inner: InnerLock::new(IntrusiveLinkedListInner::new()),
         }
     }
 

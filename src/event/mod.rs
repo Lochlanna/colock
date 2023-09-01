@@ -152,16 +152,13 @@ impl Event {
             let was_woken = token.inner().park_until(timeout);
             if !was_woken {
                 //TODO it should be possible to test this using a similar method to the async abort
-                if !token.revoke() {
-                    // We have already been popped of the queue
-                    // We need to wait for the notification so that the notify function doesn't
-                    // access the data we are holding on our stack in the waker
-                    while token.inner().get_state() != State::Notified {
-                        core::hint::spin_loop();
-                    }
-                    return true;
+                if token.revoke() {
+                    return false;
                 }
-                return false;
+                // We have already been popped of the queue
+                // We need to wait for the notification so that the notify function doesn't
+                // access the data we are holding on our stack in the waker
+                token.inner().park();
             }
             debug_assert_eq!(token.inner().get_state(), State::Notified);
             if !on_wake() {
@@ -230,10 +227,9 @@ where
                 // TODO verify sure this is what is happening...
                 inner_state = State::Notified;
             }
-            while inner_state != State::Notified {
+            if inner_state != State::Notified {
                 // the list token has already been revoked but we haven't been woken up yet!
-                inner_state = this.list_token.inner().get_state();
-                core::hint::spin_loop();
+                return Poll::Pending;
             }
             if !(this.on_wake)() {
                 this.did_finish = true;
