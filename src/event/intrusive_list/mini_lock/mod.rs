@@ -179,16 +179,20 @@ impl<T> MiniLock<T> {
     }
 
     unsafe fn unlock(&self) -> bool {
-        self.is_locked.store(false, Ordering::Release);
-        let node = self.queue.peak();
-        if !node.is_null() && self.try_lock_internal() {
-            debug_assert!(self.is_locked());
-            let node = self.queue.peak();
-            let did_unpark = (*node).data.unpark_handle().un_park();
-            debug_assert!(did_unpark);
-            return true;
+        loop {
+            self.is_locked.store(false, Ordering::Release);
+            if !self.queue.peak().is_null() && self.try_lock_internal() {
+                debug_assert!(self.is_locked());
+                let node = self.queue.peak();
+                if node.is_null() {
+                    continue;
+                }
+                let did_unpark = (*node).data.unpark_handle().un_park();
+                debug_assert!(did_unpark);
+                return true;
+            }
+            return false;
         }
-        false
     }
 
     fn try_lock_internal(&self) -> bool {
