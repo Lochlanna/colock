@@ -108,7 +108,7 @@ impl<T> MiniLock<T> {
     }
 
     pub fn lock(&self) -> MiniLockGuard<T> {
-        let mut spin = SpinWait::<20, 0>::new();
+        let mut spin = SpinWait::<3, 7>::new();
         while spin.spin() {
             if let Some(guard) = self.try_lock() {
                 return guard;
