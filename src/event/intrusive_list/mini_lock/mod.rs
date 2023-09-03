@@ -167,20 +167,26 @@ impl<T> MiniLock<T> {
     }
 
     unsafe fn unlock(&self) -> bool {
-        if self
-            .head
-            .compare_exchange(LOCKED_BIT, 0, Ordering::Release, Ordering::Acquire)
-            .is_ok()
-        {
-            return false;
-        };
-        // there are waiters on the queue!
-        // the lock is still locked
-        let head = self
-            .pop()
-            .expect("a node was able to remove itself from the queue while the lock was held");
-        head.data.unpark_handle().un_park();
-        true
+        loop {
+            let head = self.head.fetch_and(!LOCKED_BIT, Ordering::Release);
+
+            if head == LOCKED_BIT {
+                // there were no waiters
+                return false;
+            }
+
+            if !self.try_lock_internal() {
+                // the lock was already locked by another thread
+                return false;
+            }
+
+            if let Some(node) = self.pop() {
+                // we got a waiter!
+                // the lock is still locked
+                node.data.unpark_handle().un_park();
+                return true;
+            }
+        }
     }
 
     pub fn is_locked(&self) -> bool {
