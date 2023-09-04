@@ -285,20 +285,25 @@ mod tests {
         let event = Event::new();
         let test_val = AtomicBool::new(false);
         let barrier = tokio::sync::Barrier::new(2);
-        tokio_scoped::scope(|s| {
-            s.spawn(async {
-                barrier.wait().await;
-                thread::sleep(Duration::from_millis(50));
-                test_val.store(true, Ordering::SeqCst);
-                assert!(event.notify_one());
-            });
-            s.spawn(async {
-                assert!(!test_val.load(Ordering::SeqCst));
-                barrier.wait().await;
-                event.wait_while_async(|| true, || false).await;
-                assert!(test_val.load(Ordering::SeqCst));
-            });
+        let test_data = Arc::new((event, test_val, barrier));
+        let test_data_cloned = test_data.clone();
+
+        let handle_a = tokio::spawn(async move {
+            test_data.2.wait().await;
+            thread::sleep(Duration::from_millis(50));
+            test_data.1.store(true, Ordering::SeqCst);
+            assert!(test_data.0.notify_one());
         });
+
+        let handle_b = tokio::spawn(async move {
+            assert!(!test_data_cloned.1.load(Ordering::SeqCst));
+            test_data_cloned.2.wait().await;
+            test_data_cloned.0.wait_while_async(|| true, || false).await;
+            assert!(test_data_cloned.1.load(Ordering::SeqCst));
+        });
+
+        handle_a.await.expect("tokio task a panicked");
+        handle_b.await.expect("tokio task b panicked");
     }
 
     /// Test that dropping the future before it is complete will result in it being revoked from
