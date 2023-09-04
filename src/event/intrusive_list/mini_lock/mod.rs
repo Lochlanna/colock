@@ -137,7 +137,7 @@ impl<T> MiniLock<T> {
         }
 
         node.data.park();
-        debug_assert!(self.is_locked());
+        debug_assert_eq!(self.head.load(Ordering::Relaxed) & LOCKED_BIT, LOCKED_BIT);
 
         MiniLockGuard { inner: self }
     }
