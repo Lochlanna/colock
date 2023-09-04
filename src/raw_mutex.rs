@@ -20,6 +20,13 @@ impl RawMutex {
             state: AtomicU8::new(0),
         }
     }
+
+    /// Returns a reference to the queue used by this mutex.
+    /// This is for testing hence the pub(crate) visibility.
+    pub(crate) const fn queue(&self) -> &Event {
+        &self.queue
+    }
+
     #[inline]
     fn try_lock_once(&self, state: &mut u8) -> bool {
         while *state & LOCKED_BIT == 0 {
@@ -225,7 +232,10 @@ mod tests {
                 for _ in 0..num_iterations {
                     mutex.lock();
                     barrier.wait();
-                    thread::sleep(Duration::from_millis(50));
+                    while mutex.queue.num_waiting() == 0 {
+                        thread::yield_now();
+                    }
+                    thread::sleep(Duration::from_millis(5));
                     unsafe {
                         mutex.unlock();
                     }
@@ -235,10 +245,7 @@ mod tests {
             for _ in 0..num_iterations {
                 barrier.wait();
                 assert!(mutex.is_locked());
-                let start = Instant::now();
                 mutex.lock();
-                let elapsed = start.elapsed().as_millis();
-                assert!(elapsed >= 40);
                 unsafe {
                     mutex.unlock();
                 }
@@ -270,7 +277,10 @@ mod tests {
                 for _ in 0..num_iterations {
                     mutex.lock_async().await;
                     barrier.wait().await;
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    while mutex.queue.num_waiting() == 0 {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
                     unsafe {
                         mutex.unlock();
                     }
@@ -281,10 +291,7 @@ mod tests {
                 for _ in 0..num_iterations {
                     barrier.wait().await;
                     assert!(mutex.is_locked());
-                    let start = Instant::now();
                     mutex.lock_async().await;
-                    let elapsed = start.elapsed().as_millis();
-                    assert!(elapsed >= 40);
                     unsafe {
                         mutex.unlock();
                     }

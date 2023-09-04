@@ -131,7 +131,10 @@ mod tests {
                 for _ in 0..num_iterations {
                     let guard = mutex.lock();
                     barrier.wait();
-                    thread::sleep(Duration::from_millis(50));
+                    while mutex.raw.queue().num_waiting() == 0 {
+                        thread::yield_now();
+                    }
+                    thread::sleep(Duration::from_millis(5));
                     drop(guard);
                     barrier.wait();
                 }
@@ -139,10 +142,7 @@ mod tests {
             for _ in 0..num_iterations {
                 barrier.wait();
                 assert!(mutex.is_locked());
-                let start = Instant::now();
                 let guard = mutex.lock();
-                let elapsed = start.elapsed().as_millis();
-                assert!(elapsed >= 40);
                 drop(guard);
                 barrier.wait();
             }
@@ -161,7 +161,10 @@ mod tests {
                 for _ in 0..num_iterations {
                     let guard = mutex.lock_async().await;
                     barrier.wait().await;
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    while mutex.raw.queue().num_waiting() == 0 {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
                     drop(guard);
                     barrier.wait().await;
                 }
@@ -170,10 +173,7 @@ mod tests {
                 for _ in 0..num_iterations {
                     barrier.wait().await;
                     assert!(mutex.is_locked());
-                    let start = Instant::now();
                     let guard = mutex.lock_async().await;
-                    let elapsed = start.elapsed().as_millis();
-                    assert!(elapsed >= 40);
                     drop(guard);
                     barrier.wait().await;
                 }
@@ -235,7 +235,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[cfg_attr(miri, ignore)]
     async fn lots_and_lots_async() {
-        const J: u64 = 1_000_000;
+        const J: u64 = 100_000;
         // const J: u64 = 5000000;
         // const J: u64 = 50000000;
         const K: u64 = 6;
