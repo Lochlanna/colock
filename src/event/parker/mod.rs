@@ -59,27 +59,16 @@ impl Parker {
     }
     pub fn park(&self) {
         match &self.inner {
-            ParkInner::ThreadParker(thread) => {
-                while self.should_park.load(Ordering::Acquire) != State::Notified as u8 {
-                    unsafe { thread.park() }
-                }
-            }
+            ParkInner::ThreadParker(thread) => unsafe { thread.park() },
             ParkInner::Waker(_) => panic!("park not supported for waker"),
         }
     }
 
     pub fn park_until(&self, timeout: std::time::Instant) -> bool {
         match &self.inner {
-            ParkInner::ThreadParker(thread) => {
-                while self.should_park.load(Ordering::Acquire) != State::Notified as u8 {
-                    if !unsafe { thread.park_until(timeout) } {
-                        return false;
-                    }
-                }
-            }
+            ParkInner::ThreadParker(thread) => unsafe { thread.park_until(timeout) },
             ParkInner::Waker(_) => panic!("park until not supported for waker"),
         }
-        true
     }
 
     pub const fn unpark_handle(&self) -> UnparkHandle {
@@ -112,7 +101,7 @@ impl UnparkHandle {
         let parker = unsafe { &*self.inner };
         let old_state = parker
             .should_park
-            .swap(State::Notified as u8, Ordering::Relaxed);
+            .swap(State::Notified as u8, Ordering::Release);
         if old_state == State::Waiting as u8 {
             match &parker.inner {
                 ParkInner::ThreadParker(thread) => unsafe { thread.unpark() },
