@@ -119,6 +119,10 @@ fn criterion_benchmark(c: &mut Criterion) {
             b.to_async(&tokio_runtime)
                 .iter_custom(|iters| run_benchmark::<tokio::sync::Mutex<f64>>(*run, iters))
         });
+        group.bench_with_input(BenchmarkId::new("maitake-sync", run), &run, |b, run| {
+            b.to_async(&tokio_runtime)
+                .iter_custom(|iters| run_benchmark::<maitake_sync::Mutex<f64>>(*run, iters))
+        });
     }
 }
 
