@@ -171,6 +171,10 @@ impl Event {
         }
         !did_time_out.get()
     }
+
+    pub fn num_waiting(&self) -> usize {
+        self.inner.len()
+    }
 }
 
 pub struct Poller<'a, S, W>
@@ -268,7 +272,11 @@ mod tests {
         thread::scope(|s| {
             s.spawn(|| {
                 barrier.wait();
-                thread::sleep(Duration::from_millis(50));
+                while event.num_waiting() == 0 {
+                    thread::yield_now();
+                }
+                //make sure the other thread goes to sleep
+                thread::sleep(Duration::from_millis(10));
                 test_val.store(true, Ordering::SeqCst);
                 assert!(event.notify_one());
             });
@@ -290,7 +298,10 @@ mod tests {
 
         let handle_a = tokio::spawn(async move {
             test_data.2.wait().await;
-            thread::sleep(Duration::from_millis(50));
+            while test_data.0.num_waiting() == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
             test_data.1.store(true, Ordering::SeqCst);
             assert!(test_data.0.notify_one());
         });

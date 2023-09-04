@@ -137,7 +137,7 @@ impl<T> MiniLock<T> {
         }
 
         node.data.park();
-        assert!(self.is_locked());
+        debug_assert!(self.is_locked());
 
         MiniLockGuard { inner: self }
     }
