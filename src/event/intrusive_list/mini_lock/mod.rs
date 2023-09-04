@@ -34,6 +34,7 @@ unsafe impl<T> Sync for MiniLock<T> {}
 unsafe impl<T> Send for MiniLock<T> where T: Send {}
 
 impl<T> MiniLock<T> {
+    /// Creates a new `MiniLock` in an unlocked state ready for use.
     pub const fn new(data: T) -> Self {
         Self {
             data: UnsafeCell::new(data),
@@ -41,7 +42,18 @@ impl<T> MiniLock<T> {
         }
     }
 
-    fn push(&self, node: &mut Node) {
+    /// Pushes a node onto the queue.
+    ///
+    /// # Safety
+    /// It is always safe to push a node onto the queue as long as the node is guaranteed to live
+    /// long enough for it to be popped off and for the thread which pops it to be finished with it.
+    ///
+    /// As this is implemented in a mutex and the queue is used for parking it's guaranteed that when
+    /// a thread is woken the node has already been removed from the queue and the waking thread
+    /// is finished.
+    ///
+    /// If the thread wants to early out it must hold the lock to do so.
+    unsafe fn push(&self, node: &mut Node) {
         let mut head = self.head.load(Ordering::Acquire);
         loop {
             node.next = (head & PTR_MASK) as *mut Node;
@@ -57,7 +69,14 @@ impl<T> MiniLock<T> {
         }
     }
 
-    fn remove(&self, node: &mut Node) {
+    /// Removes a node from the queue no matter it's position.
+    ///
+    ///
+    /// # Safety
+    ///
+    /// The mutex must be have been locked by the thread that calls this function.
+    /// It is only safe for the holder of the lock to modify the queue
+    unsafe fn remove(&self, node: &mut Node) {
         let node_ptr = node as *mut Node;
         debug_assert_eq!(self.head.load(Ordering::Acquire) & LOCKED_BIT, LOCKED_BIT);
         let Err(head) = self.head.compare_exchange(
@@ -86,8 +105,16 @@ impl<T> MiniLock<T> {
         }
     }
 
-    fn pop(&self) -> Option<&Node> {
-        let mut head = self.head.load(Ordering::Acquire);
+    /// Pops the head off the queue.
+    /// Returns None if the queue is empty.
+    ///
+    ///
+    /// # Safety
+    ///
+    /// The mutex must be have been locked by the thread that calls this function.
+    /// It is only safe for the holder of the lock to modify the queue
+    unsafe fn pop(&self) -> Option<&Node> {
+        let mut head = self.head.load(Ordering::Relaxed);
         debug_assert_eq!(head & LOCKED_BIT, LOCKED_BIT);
         while head != LOCKED_BIT {
             debug_assert_eq!(head & LOCKED_BIT, LOCKED_BIT);
@@ -107,6 +134,9 @@ impl<T> MiniLock<T> {
         None
     }
 
+    /// Locks the mutex and returns a guard that will unlock it when dropped.
+    ///
+    /// This function will always lock the lock and is not cancellable.
     pub fn lock(&self) -> MiniLockGuard<T> {
         let mut spin = SpinWait::<3, 7>::new();
         while spin.spin() {
@@ -129,10 +159,13 @@ impl<T> MiniLock<T> {
         }
         //push onto the queue
         node.data.prepare_park();
-        self.push(&mut node);
+        unsafe { self.push(&mut node) };
 
         if let Some(guard) = self.try_lock() {
-            self.remove(&mut node);
+            //we have the lock so it's safe to remove ourselves from the queue
+            unsafe {
+                self.remove(&mut node);
+            }
             return guard;
         }
 
@@ -142,6 +175,7 @@ impl<T> MiniLock<T> {
         MiniLockGuard { inner: self }
     }
 
+    /// Attempts to acquire this lock without parking.
     pub fn try_lock(&self) -> Option<MiniLockGuard<T>> {
         if self.try_lock_internal() {
             return Some(MiniLockGuard { inner: self });
@@ -149,6 +183,7 @@ impl<T> MiniLock<T> {
         None
     }
 
+    /// Attempts to acquire this lock without parking.
     fn try_lock_internal(&self) -> bool {
         let mut head = self.head.load(Ordering::Acquire);
         while head & LOCKED_BIT == 0 {
@@ -166,6 +201,13 @@ impl<T> MiniLock<T> {
         false
     }
 
+    /// Unlocks the mutex.
+    ///
+    /// If there are waiting threads and it is able to re-acquire the lock it will
+    /// wake a thread and pass the lock on
+    ///
+    /// # Safety
+    /// It is only safe to call this function if the mutex is locked by the calling thread.
     unsafe fn unlock(&self) -> bool {
         loop {
             let head = self.head.fetch_and(!LOCKED_BIT, Ordering::Release);
@@ -182,7 +224,7 @@ impl<T> MiniLock<T> {
 
             if let Some(node) = self.pop() {
                 // we got a waiter!
-                // the lock is still locked
+                // the lock is locked, we are passing it to the waking thread!
                 node.data.unpark_handle().un_park();
                 return true;
             }

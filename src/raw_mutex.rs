@@ -1,11 +1,12 @@
 use crate::event::Event;
 use crate::spinwait;
 use core::sync::atomic::{AtomicU8, Ordering};
+use lock_api::RawMutex as RawMutexAPI;
 use std::time::Instant;
 
-const LOCKED_BIT: u8 = 1;
-const WAIT_BIT: u8 = 2;
-const LOCKED_AND_WAITING: u8 = 3;
+const LOCKED_BIT: u8 = 0b1;
+const WAIT_BIT: u8 = 0b10;
+const FAIR_BIT: u8 = 0b100;
 
 #[derive(Debug)]
 pub struct RawMutex {
@@ -100,6 +101,12 @@ impl RawMutex {
     const fn spin_on_wake(&self) -> impl Fn() -> bool + '_ {
         || {
             let mut state = self.state.load(Ordering::Relaxed);
+            if state & FAIR_BIT == FAIR_BIT {
+                // we are fair unlocking
+                let old = self.state.fetch_and(!FAIR_BIT, Ordering::Relaxed);
+                debug_assert_eq!(old, LOCKED_BIT | FAIR_BIT);
+                return false;
+            }
             !self.try_lock_spin(&mut state)
         }
     }
@@ -107,6 +114,12 @@ impl RawMutex {
     const fn try_on_wake(&self) -> impl Fn() -> bool + '_ {
         || {
             let mut state = self.state.load(Ordering::Relaxed);
+            if state & FAIR_BIT == FAIR_BIT {
+                // we are fair unlocking
+                let old = self.state.fetch_and(!FAIR_BIT, Ordering::Relaxed);
+                debug_assert_eq!(old, LOCKED_BIT | FAIR_BIT);
+                return false;
+            }
             !self.try_lock_once(&mut state)
         }
     }
@@ -120,6 +133,18 @@ impl RawMutex {
             }
             if num_waiters_left == 1 {
                 self.state.fetch_and(!WAIT_BIT, Ordering::Relaxed);
+            }
+            true
+        }
+    }
+
+    const fn fair_conditional_notify(&self) -> impl Fn(usize) -> bool + '_ {
+        |num_waiters_left| {
+            if num_waiters_left == 1 {
+                self.state.store(LOCKED_BIT | FAIR_BIT, Ordering::Relaxed);
+            } else {
+                self.state
+                    .store(WAIT_BIT | LOCKED_BIT | FAIR_BIT, Ordering::Relaxed);
             }
             true
         }
@@ -186,6 +211,24 @@ unsafe impl lock_api::RawMutex for RawMutex {
 
     fn is_locked(&self) -> bool {
         self.state.load(Ordering::Relaxed) & LOCKED_BIT != 0
+    }
+}
+
+unsafe impl lock_api::RawMutexFair for RawMutex {
+    unsafe fn unlock_fair(&self) {
+        self.queue.notify_if(self.fair_conditional_notify(), || {
+            //unlock from within the queue lock
+            self.state.store(0, Ordering::Release);
+        });
+    }
+
+    unsafe fn bump(&self) {
+        if self.state.load(Ordering::Acquire) & WAIT_BIT == 0 {
+            return;
+        }
+        if self.queue.notify_if(self.fair_conditional_notify(), || {}) {
+            self.lock();
+        }
     }
 }
 
