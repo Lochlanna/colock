@@ -134,7 +134,7 @@ impl super::ThreadParkerT for ThreadParker {
 }
 
 impl ThreadParker {
-    /// Initializes the condvar to use CLOCK_MONOTONIC instead of CLOCK_REALTIME.
+    /// Initializes the condvar to use `CLOCK_MONOTONIC` instead of `CLOCK_REALTIME`.
     #[cfg(any(
         target_os = "macos",
         target_os = "ios",
@@ -145,7 +145,7 @@ impl ThreadParker {
     #[inline]
     const unsafe fn init(&self) {}
 
-    /// Initializes the condvar to use CLOCK_MONOTONIC instead of CLOCK_REALTIME.
+    /// Initializes the condvar to use `CLOCK_MONOTONIC` instead of `CLOCK_REALTIME`.
     #[cfg(not(any(
         target_os = "macos",
         target_os = "ios",
@@ -219,20 +219,19 @@ fn timespec_now() -> libc::timespec {
 #[inline]
 fn timeout_to_timespec(timeout: Duration) -> Option<libc::timespec> {
     // Handle overflows early on
-    if timeout.as_secs() > libc::time_t::max_value() as u64 {
-        return None;
-    }
+    let timeout_seconds = libc::time_t::try_from(timeout.as_secs()).ok()?;
 
     let now = timespec_now();
-    let mut nsec = now.tv_nsec + timeout.subsec_nanos() as tv_nsec_t;
-    let mut sec = now.tv_sec.checked_add(timeout.as_secs() as libc::time_t);
-    if nsec >= 1_000_000_000 {
-        nsec -= 1_000_000_000;
-        sec = sec.and_then(|sec| sec.checked_add(1));
+    let mut nano_seconds = now.tv_nsec + timeout.subsec_nanos() as tv_nsec_t;
+
+    let mut seconds = now.tv_sec.checked_add(timeout_seconds);
+    if nano_seconds >= 1_000_000_000 {
+        nano_seconds -= 1_000_000_000;
+        seconds = seconds.and_then(|sec| sec.checked_add(1));
     }
 
-    sec.map(|sec| libc::timespec {
-        tv_nsec: nsec,
+    seconds.map(|sec| libc::timespec {
+        tv_nsec: nano_seconds,
         tv_sec: sec,
     })
 }

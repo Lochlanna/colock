@@ -116,7 +116,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     #[derive(Eq, PartialEq, Debug)]
     struct NonCopy(i32);
