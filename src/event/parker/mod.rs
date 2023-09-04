@@ -64,7 +64,7 @@ impl Parker {
                     unsafe { thread.park() }
                 }
             }
-            ParkInner::Waker(_) => {}
+            ParkInner::Waker(_) => panic!("park not supported for waker"),
         }
     }
 
@@ -77,7 +77,7 @@ impl Parker {
                     }
                 }
             }
-            ParkInner::Waker(_) => {}
+            ParkInner::Waker(_) => panic!("park until not supported for waker"),
         }
         true
     }
