@@ -227,10 +227,9 @@ where
                 // TODO verify sure this is what is happening...
                 inner_state = State::Notified;
             }
-            if inner_state != State::Notified {
-                // the list token has already been revoked but we haven't been woken up yet!
-                return Poll::Pending;
-            }
+
+            debug_assert!(!(inner_state != State::Notified), "we shouldn't hit this");
+
             if !(this.on_wake)() {
                 this.did_finish = true;
                 return Poll::Ready(());
