@@ -1,9 +1,8 @@
 #![allow(dead_code)]
 
+use crate::Run;
 use async_trait::async_trait;
-use std::fmt;
-use std::fmt::Display;
-use std::hint::black_box;
+use criterion::black_box;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,9 +12,63 @@ pub trait Mutex<T>: Sync {
     async fn lock<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut T) -> R + Send;
-    async fn lock_timed<F, R>(&self, f: F) -> (Duration, R)
+    async fn lock_timed<F, R>(&self, f: F) -> (std::time::Duration, R)
     where
         F: FnOnce(&mut T) -> R + Send;
+}
+
+#[async_trait]
+impl<T> Mutex<T> for tokio::sync::Mutex<T>
+where
+    T: Send,
+{
+    fn new(v: T) -> Self {
+        Self::new(v)
+    }
+    async fn lock<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut T) -> R + Send,
+    {
+        f(&mut *self.lock().await)
+    }
+
+    async fn lock_timed<F, R>(&self, f: F) -> (std::time::Duration, R)
+    where
+        F: FnOnce(&mut T) -> R + Send,
+    {
+        let start = std::time::Instant::now();
+        let mut guard = self.lock().await;
+        let elapsed = start.elapsed();
+        let res = f(&mut *guard);
+        (elapsed, res)
+    }
+}
+
+#[async_trait]
+impl<T> Mutex<T> for maitake_sync::Mutex<T>
+where
+    T: Send,
+{
+    fn new(v: T) -> Self {
+        Self::new(v)
+    }
+    async fn lock<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut T) -> R + Send,
+    {
+        f(&mut *self.lock().await)
+    }
+
+    async fn lock_timed<F, R>(&self, f: F) -> (std::time::Duration, R)
+    where
+        F: FnOnce(&mut T) -> R + Send,
+    {
+        let start = std::time::Instant::now();
+        let mut guard = self.lock().await;
+        let elapsed = start.elapsed();
+        let res = f(&mut *guard);
+        (elapsed, res)
+    }
 }
 
 #[async_trait]
@@ -45,34 +98,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct Run {
-    num_threads: usize,
-    num_inside: usize,
-    num_outside: usize,
-}
-
-impl From<(usize, usize, usize)> for Run {
-    fn from((num_threads, num_inside, num_outside): (usize, usize, usize)) -> Self {
-        Self {
-            num_threads,
-            num_inside,
-            num_outside,
-        }
-    }
-}
-
-impl Display for Run {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} threads, {} inside, {} outside",
-            self.num_threads, self.num_inside, self.num_outside
-        )
-    }
-}
-
-async fn run_benchmark<M: Mutex<f64> + Send + Sync + 'static>(
+pub async fn run_throughput_benchmark<M: Mutex<f64> + Send + Sync + 'static>(
     run: Run,
     num_iters: u64,
 ) -> Duration {
@@ -112,6 +138,7 @@ async fn run_benchmark<M: Mutex<f64> + Send + Sync + 'static>(
             })
         })
         .collect::<Vec<_>>();
+
     barrier.wait().await;
 
     let mut min_start = Instant::now();
@@ -121,14 +148,4 @@ async fn run_benchmark<M: Mutex<f64> + Send + Sync + 'static>(
         max_end = max_end.max(end);
     }
     max_end - min_start
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore]
-async fn run_bench() {
-    for i in 0..1 {
-        run_benchmark::<colock::mutex::Mutex<f64>>(Run::from((2, 1, 1)), 618222).await;
-        println!("done {}", i);
-        std::io::Write::flush(&mut std::io::stdout()).unwrap();
-    }
 }
