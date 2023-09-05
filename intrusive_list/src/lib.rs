@@ -3,6 +3,7 @@
 // #![warn(missing_docs_in_private_items)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![allow(clippy::module_name_repetitions)]
+#![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod maybe_ref;
 
@@ -34,6 +35,7 @@ where
 
 unsafe impl<T> Sync for IntrusiveLinkedList<T> {}
 impl<T> IntrusiveLinkedList<T> {
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             inner: InnerLock::new(IntrusiveLinkedListInner::new()),
@@ -76,6 +78,10 @@ impl<T> IntrusiveLinkedList<T> {
 
     pub fn len(&self) -> usize {
         self.inner.lock().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

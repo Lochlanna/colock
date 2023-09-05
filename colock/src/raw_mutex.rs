@@ -15,6 +15,7 @@ pub struct RawMutex {
 }
 
 impl RawMutex {
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             queue: Event::new(),

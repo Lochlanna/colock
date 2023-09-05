@@ -3,6 +3,7 @@
 // #![warn(missing_docs_in_private_items)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![allow(clippy::module_name_repetitions)]
+#![warn(clippy::undocumented_unsafe_blocks)]
 
 use core::cell::Cell;
 use core::pin::{pin, Pin};
@@ -18,6 +19,7 @@ pub struct Event {
 }
 
 impl Event {
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             inner: IntrusiveLinkedList::new(),
@@ -70,7 +72,7 @@ impl Event {
             },
             &on_empty,
         ) {
-            if unpark_handle.un_park() {
+            if unsafe { unpark_handle.un_park() } {
                 return true;
             }
         }

@@ -10,14 +10,17 @@ pub enum MaybeRef<'a, T> {
 unsafe impl<T> Send for MaybeRef<'_, T> where T: Send {}
 
 impl<'a, T> MaybeRef<'a, T> {
+    #[must_use]
     pub const fn new_owned(inner: T) -> Self {
         Self::Owned(inner)
     }
 
+    #[must_use]
     pub const fn new_ref(inner: &'a T) -> Self {
         Self::Ref(inner)
     }
 
+    #[must_use]
     pub const fn new_boxed(inner: Box<T>) -> Self {
         Self::Boxed(inner)
     }

@@ -3,6 +3,7 @@
 // #![warn(missing_docs_in_private_items)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![allow(clippy::module_name_repetitions)]
+#![warn(clippy::undocumented_unsafe_blocks)]
 
 mod thread_parker;
 
@@ -39,6 +40,7 @@ pub struct Parker {
 }
 
 impl Parker {
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             inner: ParkInner::ThreadParker(thread_parker::ThreadParker::const_new()),
@@ -46,6 +48,7 @@ impl Parker {
         }
     }
 
+    #[must_use]
     pub const fn new_async() -> Self {
         Self {
             inner: ParkInner::Waker(Cell::new(None)),
@@ -103,7 +106,8 @@ pub struct UnparkHandle {
 }
 
 impl UnparkHandle {
-    pub fn un_park(&self) -> bool {
+    #[must_use]
+    pub unsafe fn un_park(&self) -> bool {
         let parker = unsafe { &*self.inner };
         parker
             .should_park
