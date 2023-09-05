@@ -1,16 +1,11 @@
 #![allow(dead_code)]
 
-mod intrusive_list;
-mod maybe_ref;
-mod parker;
-
-use crate::event::maybe_ref::MaybeRef;
-use crate::event::parker::State;
+use core::cell::Cell;
+use core::pin::{pin, Pin};
+use core::task::{Context, Poll};
+use intrusive_list::maybe_ref::MaybeRef;
 use intrusive_list::{IntrusiveLinkedList, ListToken, Node};
-use parker::Parker;
-use std::cell::Cell;
-use std::pin::{pin, Pin};
-use std::task::{Context, Poll};
+use parking::{Parker, State};
 use std::time::Instant;
 
 #[derive(Debug)]

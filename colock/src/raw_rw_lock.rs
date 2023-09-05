@@ -1,4 +1,4 @@
-use crate::event::Event;
+use event::Event;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SHARED_LOCK: usize = 0b1;

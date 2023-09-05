@@ -1,9 +1,9 @@
-mod mini_lock;
+pub mod maybe_ref;
 
-use crate::event::maybe_ref::MaybeRef;
 use core::cell::Cell;
 use core::fmt::{Debug, Formatter};
 use core::pin::Pin;
+use maybe_ref::MaybeRef;
 
 // Alias MiniLock to allow for testing with other lock implementations
 use mini_lock::MiniLock as InnerLock;

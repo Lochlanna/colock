@@ -1,6 +1,6 @@
-use crate::event::Event;
 use crate::spinwait;
 use core::sync::atomic::{AtomicU8, Ordering};
+use event::Event;
 use lock_api::RawMutex as RawMutexAPI;
 use std::time::Instant;
 

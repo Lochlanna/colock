@@ -1,9 +1,9 @@
 mod thread_parker;
 
-use crate::event::parker::thread_parker::ThreadParkerT;
 use std::cell::Cell;
 use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicU8, Ordering};
+use thread_parker::ThreadParkerT;
 
 enum ParkInner {
     ThreadParker(thread_parker::ThreadParker),

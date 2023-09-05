@@ -1,7 +1,8 @@
 mod atomic_const_ptr;
+mod spinwait;
 
-use crate::event::parker::Parker;
-use crate::spinwait::SpinWait;
+use parking::Parker;
+use spinwait::SpinWait;
 use std::cell::UnsafeCell;
 use std::ops::{Deref, DerefMut};
 use std::ptr::null_mut;
