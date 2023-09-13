@@ -152,12 +152,7 @@ impl<T> MiniLock<T> {
                 return guard;
             }
         }
-
-        thread_local! {
-            static NODE: Node = const {Node::new(Parker::new())};
-        }
-
-        NODE.with(|node| {
+        Self::with_node(|node| {
             if let Some(guard) = self.try_lock() {
                 return guard;
             }
@@ -178,6 +173,17 @@ impl<T> MiniLock<T> {
 
             MiniLockGuard { inner: self }
         })
+    }
+
+    fn with_node<R>(f: impl FnOnce(&Node) -> R) -> R {
+        if Parker::is_cheap_to_construct() {
+            let node = Node::new(Parker::new());
+            return f(&node);
+        }
+        thread_local! {
+            static NODE: Node = const {Node::new(Parker::new())};
+        }
+        NODE.with(f)
     }
 
     /// Attempts to acquire this lock without parking.
