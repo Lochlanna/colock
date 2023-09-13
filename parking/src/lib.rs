@@ -49,6 +49,11 @@ impl Parker {
     }
 
     #[must_use]
+    pub const fn is_cheap_to_construct() -> bool {
+        thread_parker::ThreadParker::IS_CHEAP_TO_CONSTRUCT
+    }
+
+    #[must_use]
     pub const fn new_async() -> Self {
         Self {
             inner: ParkInner::Waker(Cell::new(None)),

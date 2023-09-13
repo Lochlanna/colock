@@ -102,6 +102,12 @@ impl Event {
     }
 
     fn with_thread_token<R>(&self, f: impl FnOnce(&Pin<&mut ListToken<Parker>>) -> R) -> R {
+        if Parker::is_cheap_to_construct() {
+            let node = Node::new(Parker::new());
+            let token = pin!(self.inner.build_token(node.into()));
+            return f(&token);
+        }
+
         thread_local! {
             static NODE: Node<Parker> = const {Node::new(Parker::new())}
         }
