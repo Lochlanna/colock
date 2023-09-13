@@ -63,7 +63,7 @@ impl Event {
         num_notified
     }
     pub fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn()) -> bool {
-        while let Some(unpark_handle) = self.inner.pop_if(
+        if let Some(unpark_handle) = self.inner.pop_if(
             |parker, num_left| {
                 if !condition(num_left) {
                     return None;
@@ -72,9 +72,10 @@ impl Event {
             },
             &on_empty,
         ) {
-            if unsafe { unpark_handle.un_park() } {
-                return true;
+            unsafe {
+                unpark_handle.un_park();
             }
+            return true;
         }
         false
     }

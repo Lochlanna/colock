@@ -20,6 +20,7 @@ seqlock = "0.2"
 libc = "0.2"
 usync = "0.2.1"
 maitake-sync = "0.1.0"
+mini_lock = {path="../mini_lock"}
 
 
 [[bench]]

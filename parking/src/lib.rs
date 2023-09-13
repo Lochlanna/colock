@@ -106,16 +106,14 @@ pub struct UnparkHandle {
 }
 
 impl UnparkHandle {
-    #[must_use]
-    pub unsafe fn un_park(&self) -> bool {
-        let parker = unsafe { &*self.inner };
+    pub unsafe fn un_park(&self) {
+        let parker = &*self.inner;
         parker
             .should_park
             .store(State::Notified as u8, Ordering::Release);
         match &parker.inner {
-            ParkInner::ThreadParker(thread) => unsafe { thread.unpark() },
+            ParkInner::ThreadParker(thread) => thread.unpark(),
             ParkInner::Waker(waker) => waker.take().expect("there was no waker").wake(),
         }
-        true
     }
 }

@@ -16,6 +16,30 @@ pub trait Mutex<T> {
         F: FnOnce(&mut T) -> R;
 }
 
+impl<T> Mutex<T> for mini_lock::MiniLock<T> {
+    fn new(v: T) -> Self {
+        Self::new(v)
+    }
+
+    fn lock<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut T) -> R,
+    {
+        f(&mut *self.lock())
+    }
+
+    fn lock_timed<F, R>(&self, f: F) -> (Duration, R)
+    where
+        F: FnOnce(&mut T) -> R,
+    {
+        let start = std::time::Instant::now();
+        let mut guard = self.lock();
+        let elapsed = start.elapsed();
+        let res = f(&mut *guard);
+        (elapsed, res)
+    }
+}
+
 impl<T> Mutex<T> for std::sync::Mutex<T> {
     fn new(v: T) -> Self {
         Self::new(v)
