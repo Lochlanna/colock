@@ -101,28 +101,28 @@ impl Event {
         self.wait_while(will_sleep, || false);
     }
 
-    fn get_thread_token(&self) -> ListToken<Parker> {
+    fn with_thread_token<R>(&self, f: impl FnOnce(&Pin<&mut ListToken<Parker>>) -> R) -> R {
         thread_local! {
             static NODE: Node<Parker> = const {Node::new(Parker::new())}
         }
         NODE.with(|node| {
-            let node: &'static Node<Parker> = unsafe { core::mem::transmute(node) };
-            self.inner.build_token(node.into())
+            let token = pin!(self.inner.build_token(node.into()));
+            f(&token)
         })
     }
 
     pub fn wait_while(&self, should_sleep: impl Fn() -> bool, on_wake: impl Fn() -> bool) {
-        let token = pin!(self.get_thread_token());
-
-        token.inner().prepare_park();
-        while token.as_ref().push_if(&should_sleep) {
-            token.inner().park();
-            debug_assert_eq!(token.inner().get_state(), State::Notified);
-            if !on_wake() {
-                return;
-            }
+        self.with_thread_token(|token| {
             token.inner().prepare_park();
-        }
+            while token.as_ref().push_if(&should_sleep) {
+                token.inner().park();
+                debug_assert_eq!(token.inner().get_state(), State::Notified);
+                if !on_wake() {
+                    return;
+                }
+                token.inner().prepare_park();
+            }
+        });
     }
 
     pub fn wait_while_until(
@@ -131,47 +131,47 @@ impl Event {
         on_wake: impl Fn() -> bool,
         timeout: Instant,
     ) -> bool {
-        let token = pin!(self.get_thread_token());
+        self.with_thread_token(|token| {
+            let did_time_out = Cell::new(false);
 
-        let did_time_out = Cell::new(false);
-
-        // extend the will sleep function with timeout check code
-        let will_sleep = || {
-            let now = Instant::now();
-            if now >= timeout {
-                did_time_out.set(true);
-                return false;
-            }
-            should_sleep()
-        };
-
-        if Instant::now() >= timeout {
-            return false;
-        }
-
-        token.inner().prepare_park();
-        while token.as_ref().push_if(will_sleep) {
-            let was_woken = token.inner().park_until(timeout);
-            if !was_woken {
-                //TODO it should be possible to test this using a similar method to the async abort
-                if token.revoke() {
+            // extend the will sleep function with timeout check code
+            let will_sleep = || {
+                let now = Instant::now();
+                if now >= timeout {
+                    did_time_out.set(true);
                     return false;
                 }
-                // We have already been popped of the queue
-                // We need to wait for the notification so that the notify function doesn't
-                // access the data we are holding on our stack in the waker
-                token.inner().park();
-            }
-            debug_assert_eq!(token.inner().get_state(), State::Notified);
-            if !on_wake() {
-                return true;
-            }
-            token.inner().prepare_park();
+                should_sleep()
+            };
+
             if Instant::now() >= timeout {
                 return false;
             }
-        }
-        !did_time_out.get()
+
+            token.inner().prepare_park();
+            while token.as_ref().push_if(will_sleep) {
+                let was_woken = token.inner().park_until(timeout);
+                if !was_woken {
+                    //TODO it should be possible to test this using a similar method to the async abort
+                    if token.revoke() {
+                        return false;
+                    }
+                    // We have already been popped of the queue
+                    // We need to wait for the notification so that the notify function doesn't
+                    // access the data we are holding on our stack in the waker
+                    token.inner().park();
+                }
+                debug_assert_eq!(token.inner().get_state(), State::Notified);
+                if !on_wake() {
+                    return true;
+                }
+                token.inner().prepare_park();
+                if Instant::now() >= timeout {
+                    return false;
+                }
+            }
+            !did_time_out.get()
+        })
     }
 
     pub fn num_waiting(&self) -> usize {
