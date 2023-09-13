@@ -10,7 +10,7 @@ mod spinwait;
 
 use parking::Parker;
 use spinwait::SpinWait;
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::ops::{Deref, DerefMut};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,15 +20,15 @@ const PTR_MASK: usize = !LOCKED_BIT;
 
 #[repr(align(2))]
 struct Node {
-    data: &'static Parker,
-    next: *mut Self,
+    parker: Parker,
+    next: Cell<*mut Self>,
 }
 
 impl Node {
-    const fn new(data: &'static Parker) -> Self {
+    const fn new(parker: Parker) -> Self {
         Self {
-            data,
-            next: null_mut(),
+            parker,
+            next: Cell::new(null_mut()),
         }
     }
 }
@@ -61,10 +61,10 @@ impl<T> MiniLock<T> {
     /// is finished.
     ///
     /// If the thread wants to early out it must hold the lock to do so.
-    unsafe fn push(&self, node: &mut Node) {
+    unsafe fn push(&self, node: &Node) {
         let mut head = self.head.load(Ordering::Acquire);
         loop {
-            node.next = (head & PTR_MASK) as *mut Node;
+            node.next.set((head & PTR_MASK) as *mut Node);
             let target = node as *const _ as usize | (head & LOCKED_BIT);
             if let Err(new_head) =
                 self.head
@@ -84,12 +84,12 @@ impl<T> MiniLock<T> {
     ///
     /// The mutex must be have been locked by the thread that calls this function.
     /// It is only safe for the holder of the lock to modify the queue
-    unsafe fn remove(&self, node: &mut Node) {
-        let node_ptr = node as *mut Node;
+    unsafe fn remove(&self, node: &Node) {
+        let node_ptr = node as *const Node;
         debug_assert_eq!(self.head.load(Ordering::Acquire) & LOCKED_BIT, LOCKED_BIT);
         let Err(head) = self.head.compare_exchange(
             node_ptr as usize | LOCKED_BIT,
-            node.next as usize | LOCKED_BIT,
+            node.next.get() as usize | LOCKED_BIT,
             Ordering::Relaxed,
             Ordering::Relaxed,
         ) else {
@@ -101,15 +101,15 @@ impl<T> MiniLock<T> {
         debug_assert_eq!(head & LOCKED_BIT, LOCKED_BIT);
 
         let mut prev = null_mut();
-        while current_ptr != node_ptr {
+        while current_ptr.cast_const() != node_ptr {
             let current = unsafe { &*current_ptr };
             prev = current_ptr;
-            current_ptr = current.next;
+            current_ptr = current.next.get();
         }
 
         debug_assert!(!prev.is_null());
         unsafe {
-            (*prev).next = node.next;
+            (*prev).next.set(node.next.get());
         }
     }
 
@@ -128,7 +128,7 @@ impl<T> MiniLock<T> {
             debug_assert_eq!(head & LOCKED_BIT, LOCKED_BIT);
             let head_ptr = (head & PTR_MASK) as *mut Node;
             let head_ref = unsafe { &*head_ptr };
-            let next = head_ref.next as usize | LOCKED_BIT;
+            let next = head_ref.next.get() as usize | LOCKED_BIT;
             if let Err(new_head) =
                 self.head
                     .compare_exchange_weak(head, next, Ordering::Relaxed, Ordering::Relaxed)
@@ -154,33 +154,30 @@ impl<T> MiniLock<T> {
         }
 
         thread_local! {
-            static PARKER: Parker = const {Parker::new()};
+            static NODE: Node = const {Node::new(Parker::new())};
         }
 
-        let mut node = PARKER.with(|parker| {
-            let parker: &'static Parker = unsafe { std::mem::transmute(parker) };
-            Node::new(parker)
-        });
-
-        if let Some(guard) = self.try_lock() {
-            return guard;
-        }
-        //push onto the queue
-        node.data.prepare_park();
-        unsafe { self.push(&mut node) };
-
-        if let Some(guard) = self.try_lock() {
-            //we have the lock so it's safe to remove ourselves from the queue
-            unsafe {
-                self.remove(&mut node);
+        NODE.with(|node| {
+            if let Some(guard) = self.try_lock() {
+                return guard;
             }
-            return guard;
-        }
+            //push onto the queue
+            node.parker.prepare_park();
+            unsafe { self.push(node) };
 
-        node.data.park();
-        debug_assert_eq!(self.head.load(Ordering::Relaxed) & LOCKED_BIT, LOCKED_BIT);
+            if let Some(guard) = self.try_lock() {
+                //we have the lock so it's safe to remove ourselves from the queue
+                unsafe {
+                    self.remove(node);
+                }
+                return guard;
+            }
 
-        MiniLockGuard { inner: self }
+            node.parker.park();
+            debug_assert_eq!(self.head.load(Ordering::Relaxed) & LOCKED_BIT, LOCKED_BIT);
+
+            MiniLockGuard { inner: self }
+        })
     }
 
     /// Attempts to acquire this lock without parking.
@@ -233,7 +230,7 @@ impl<T> MiniLock<T> {
             if let Some(node) = self.pop() {
                 // we got a waiter!
                 // the lock is locked, we are passing it to the waking thread!
-                node.data.unpark_handle().un_park();
+                node.parker.unpark_handle().un_park();
                 return true;
             }
         }
