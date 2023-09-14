@@ -1,6 +1,13 @@
+//! `MiniLock` is a small, light weight, unfair, FILO mutex that does not use any other locks including spin
+//! locks. It makes use of thread parking and thread yielding along with a FILO queue to provide
+//! a self contained priority inversion safe mutex.
+//!
+//! `MiniLock` provides only try lock and lock functions. It does not provide any cancellable locking
+//! functionality. This restriction allows it to use itself as the lock to modify the queue. Only
+//! threads which hold the lock are allowed to modify/remove themselves from the queue.
+
 #![allow(dead_code)]
-// #![warn(missing_docs)]
-// #![warn(missing_docs_in_private_items)]
+#![warn(missing_docs)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![allow(clippy::module_name_repetitions)]
 #![warn(clippy::undocumented_unsafe_blocks)]
@@ -12,10 +19,14 @@ use parking::Parker;
 use spinwait::SpinWait;
 use std::cell::{Cell, UnsafeCell};
 use std::ops::{Deref, DerefMut};
+use std::pin::{pin, Pin};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// `LOCKED_BIT` is the bit that is set when the lock is locked
 const LOCKED_BIT: usize = 0b1;
+
+/// `PTR_MASK` is the mask that is used to get the pointer to the head of the queue
 const PTR_MASK: usize = !LOCKED_BIT;
 
 #[repr(align(2))]
@@ -25,6 +36,7 @@ struct Node {
 }
 
 impl Node {
+    /// Creates a new node with the given parker
     const fn new(parker: Parker) -> Self {
         Self {
             parker,
@@ -33,12 +45,20 @@ impl Node {
     }
 }
 
+/// A small, light weight, unfair, FILO mutex that does not use any other locks including spin
+/// locks. It makes use of thread parking and thread yielding along with a FILO queue to provide
+/// a self contained priority inversion safe mutex.
 pub struct MiniLock<T> {
+    /// The data that is protected by the mutex
     data: UnsafeCell<T>,
+    /// A tagged pointer representing the head of the queue and the lock state
     head: AtomicUsize,
 }
 
+// SAFETY: MiniLock provides the synchronization needed to access the data
 unsafe impl<T> Sync for MiniLock<T> {}
+
+// SAFETY: MiniLock is safe to send as long as the data is safe to send
 unsafe impl<T> Send for MiniLock<T> where T: Send {}
 
 impl<T> MiniLock<T> {
@@ -61,7 +81,7 @@ impl<T> MiniLock<T> {
     /// is finished.
     ///
     /// If the thread wants to early out it must hold the lock to do so.
-    unsafe fn push(&self, node: &Node) {
+    fn push(&self, node: &Node) {
         let mut head = self.head.load(Ordering::Acquire);
         loop {
             node.next.set((head & PTR_MASK) as *mut Node);
@@ -124,9 +144,13 @@ impl<T> MiniLock<T> {
     unsafe fn pop(&self) -> Option<&Node> {
         let mut head = self.head.load(Ordering::Relaxed);
         debug_assert_eq!(head & LOCKED_BIT, LOCKED_BIT);
+        // this checks to see if the queue is empty as the pop function required the lock to be held
+        // meaning the locked bit will always be set. Therefore empty list == LOCKED_BIT
         while head != LOCKED_BIT {
             debug_assert_eq!(head & LOCKED_BIT, LOCKED_BIT);
             let head_ptr = (head & PTR_MASK) as *mut Node;
+            debug_assert_ne!(head_ptr, null_mut());
+            // SAFETY: we know that the head is not null as we checked for that above
             let head_ref = unsafe { &*head_ptr };
             let next = head_ref.next.get() as usize | LOCKED_BIT;
             if let Err(new_head) =
@@ -156,6 +180,7 @@ impl<T> MiniLock<T> {
         self.lock_slow(head)
     }
 
+    /// Locks the mutex and returns a guard that will unlock it when dropped.
     fn lock_slow(&self, mut head: usize) -> MiniLockGuard<T> {
         let mut spin = SpinWait::<3, 7>::new();
         while head & LOCKED_BIT == 0 || spin.spin() {
@@ -176,10 +201,10 @@ impl<T> MiniLock<T> {
             }
             //push onto the queue
             node.parker.prepare_park();
-            unsafe { self.push(node) };
+            self.push(node);
 
             if let Some(guard) = self.try_lock() {
-                //we have the lock so it's safe to remove ourselves from the queue
+                // SAFETY: we now hold the lock meaning that we are allowed to modify the queue
                 unsafe {
                     self.remove(node);
                 }
@@ -193,6 +218,9 @@ impl<T> MiniLock<T> {
         })
     }
 
+    /// Executes the given function with a node.
+    /// The node might be constructed or it might be a thread local.
+    #[inline]
     fn with_node<R>(f: impl FnOnce(&Node) -> R) -> R {
         if Parker::is_cheap_to_construct() {
             let node = Node::new(Parker::new());
@@ -272,6 +300,8 @@ pub struct MiniLockGuard<'lock, T> {
 
 impl<T> Drop for MiniLockGuard<'_, T> {
     fn drop(&mut self) {
+        // SAFETY: we know we hold the lock as LockGuard is only given out
+        // when the lock is held and is not Sync
         unsafe { self.inner.unlock() };
     }
 }
@@ -286,6 +316,8 @@ impl<T> Deref for MiniLockGuard<'_, T> {
 
 impl<T> DerefMut for MiniLockGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: we have exclusive access to the data as LockGuard is only given out
+        // when the lock is held and is not Sync
         unsafe { &mut *self.inner.data.get() }
     }
 }

@@ -1,3 +1,6 @@
+/// [`AtomicConstPtr<T>`] is a wrapper around a standard atomic pointer where all methods use and return
+/// const versions of the pointer rather than mutable versions. The API is otherwise the same as
+/// [`AtomicPtr<T>`]
 use core::sync::atomic::AtomicPtr;
 use core::sync::atomic::Ordering;
 
