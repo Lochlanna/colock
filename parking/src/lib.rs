@@ -31,7 +31,9 @@ impl Debug for ParkInner {
 #[repr(u8)]
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub enum State {
+    /// The parker is waiting to be notified
     Waiting = 1,
+    /// The parker has been notified and will not sleep again until reset
     Notified = 2,
 }
 

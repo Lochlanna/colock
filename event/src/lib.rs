@@ -295,6 +295,17 @@ mod tests {
         });
     }
 
+    // Test for https://github.com/Lochlanna/colock4/issues/1
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn test_async_timeout() {
+        let event = Event::new();
+        tokio::select! {
+            _ = event.wait_while_async(|| true, || false) => panic!("should have timed out"),
+            _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     #[cfg_attr(miri, ignore)]
     async fn async_event() {
