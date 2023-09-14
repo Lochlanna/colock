@@ -145,11 +145,29 @@ impl<T> MiniLock<T> {
     /// Locks the mutex and returns a guard that will unlock it when dropped.
     ///
     /// This function will always lock the lock and is not cancellable.
+    #[inline]
     pub fn lock(&self) -> MiniLockGuard<T> {
+        let Err(head) =
+            self.head
+                .compare_exchange(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
+        else {
+            return MiniLockGuard { inner: self };
+        };
+        self.lock_slow(head)
+    }
+
+    fn lock_slow(&self, mut head: usize) -> MiniLockGuard<T> {
         let mut spin = SpinWait::<3, 7>::new();
-        while spin.spin() {
-            if let Some(guard) = self.try_lock() {
-                return guard;
+        while head & LOCKED_BIT == 0 || spin.spin() {
+            if let Err(new_head) = self.head.compare_exchange_weak(
+                head & !LOCKED_BIT,
+                head | LOCKED_BIT,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                head = new_head;
+            } else {
+                return MiniLockGuard { inner: self };
             }
         }
         Self::with_node(|node| {
@@ -188,23 +206,24 @@ impl<T> MiniLock<T> {
 
     /// Attempts to acquire this lock without parking.
     pub fn try_lock(&self) -> Option<MiniLockGuard<T>> {
-        if self.try_lock_internal() {
+        let mut head = self.head.load(Ordering::Acquire);
+        if self.try_lock_internal(&mut head) {
             return Some(MiniLockGuard { inner: self });
         }
         None
     }
 
     /// Attempts to acquire this lock without parking.
-    fn try_lock_internal(&self) -> bool {
-        let mut head = self.head.load(Ordering::Acquire);
-        while head & LOCKED_BIT == 0 {
+    #[inline]
+    fn try_lock_internal(&self, head: &mut usize) -> bool {
+        while *head & LOCKED_BIT == 0 {
             if let Err(new_head) = self.head.compare_exchange_weak(
-                head,
-                head | LOCKED_BIT,
+                *head,
+                *head | LOCKED_BIT,
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
-                head = new_head;
+                *head = new_head;
             } else {
                 return true;
             }
@@ -221,14 +240,14 @@ impl<T> MiniLock<T> {
     /// It is only safe to call this function if the mutex is locked by the calling thread.
     unsafe fn unlock(&self) -> bool {
         loop {
-            let head = self.head.fetch_and(!LOCKED_BIT, Ordering::Release);
+            let mut head = self.head.fetch_and(!LOCKED_BIT, Ordering::Release);
 
             if head == LOCKED_BIT {
                 // there were no waiters
                 return false;
             }
-
-            if !self.try_lock_internal() {
+            head &= !LOCKED_BIT;
+            if !self.try_lock_internal(&mut head) {
                 // the lock was already locked by another thread
                 return false;
             }
