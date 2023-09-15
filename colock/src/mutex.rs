@@ -77,7 +77,7 @@ pub struct MutexGuard<'a, T: ?Sized> {
     mutex: &'a Mutex<T>,
 }
 
-unsafe impl<T> Send for MutexGuard<'_, T> where T: Send {}
+unsafe impl<T> Send for MutexGuard<'_, T> {}
 
 impl<T> Drop for MutexGuard<'_, T>
 where
