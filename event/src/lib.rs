@@ -7,15 +7,88 @@
 
 use core::cell::Cell;
 use core::pin::{pin, Pin};
-use core::task::{Context, Poll};
+use core::task::{Context, Poll, Waker};
 use intrusive_list::maybe_ref::MaybeRef;
 use intrusive_list::{IntrusiveLinkedList, ListToken, Node};
-use parking::{Parker, State};
+use parking::{ThreadParker, ThreadParkerT};
+use std::fmt::{Debug, Formatter};
 use std::time::Instant;
+
+enum Handle {
+    Sync(ThreadParker),
+    Async(Cell<Option<Waker>>),
+}
+
+impl Debug for Handle {
+    //TODO can we do more/better here..?
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Handle::Sync(_) => write!(f, "Handle::Sync"),
+            Handle::Async(_) => write!(f, "Handle::Async"),
+        }
+    }
+}
+
+trait ThreadHandle: Wakeable {
+    fn thread_parker(&self) -> Option<&ThreadParker>;
+}
+
+trait AsyncHandle: Wakeable {
+    fn replace_waker(&self, new_waker: Waker);
+}
+
+trait Wakeable {
+    fn unpark_handle(&self) -> UnparkHandle;
+}
+impl Wakeable for Handle {
+    fn unpark_handle(&self) -> UnparkHandle {
+        match self {
+            Self::Sync(thread_parker) => UnparkHandle::Sync(thread_parker),
+            Self::Async(waker) => UnparkHandle::Async(waker.take()),
+        }
+    }
+}
+
+impl ThreadHandle for Handle {
+    fn thread_parker(&self) -> Option<&ThreadParker> {
+        match self {
+            Self::Sync(thread_parker) => Some(thread_parker),
+            Self::Async(_) => None,
+        }
+    }
+}
+impl AsyncHandle for Handle {
+    fn replace_waker(&self, new_waker: Waker) {
+        match self {
+            Self::Sync(_) => panic!("should not replace waker for sync code"),
+            Self::Async(waker) => waker.set(Some(new_waker)),
+        };
+    }
+}
+enum UnparkHandle {
+    Sync(*const ThreadParker),
+    Async(Option<Waker>),
+}
+
+impl UnparkHandle {
+    unsafe fn unpark(self) -> bool {
+        match self {
+            Self::Sync(thread_parker) => {
+                (*thread_parker).unpark();
+                //TODO unpark could also return a bool..?
+                true
+            }
+            Self::Async(maybe_waker) => maybe_waker.map_or(false, |waker| {
+                waker.wake();
+                true
+            }),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct Event {
-    inner: IntrusiveLinkedList<Parker>,
+    inner: IntrusiveLinkedList<Handle>,
 }
 
 impl Event {
@@ -73,7 +146,7 @@ impl Event {
             &on_empty,
         ) {
             unsafe {
-                unpark_handle.un_park();
+                unpark_handle.unpark();
             }
             return true;
         }
@@ -91,7 +164,7 @@ impl Event {
             on_wake,
             list_token: self
                 .inner
-                .build_token(MaybeRef::Owned(Node::new(Parker::new_async()))),
+                .build_token(MaybeRef::Owned(Node::new(Handle::Async(Cell::new(None))))),
             did_finish: false,
             initialised: false,
         }
@@ -101,15 +174,15 @@ impl Event {
         self.wait_while(will_sleep, || false);
     }
 
-    fn with_thread_token<R>(&self, f: impl FnOnce(&Pin<&mut ListToken<Parker>>) -> R) -> R {
-        if Parker::is_cheap_to_construct() {
-            let node = Node::new(Parker::new());
+    fn with_thread_token<R>(&self, f: impl FnOnce(&Pin<&mut ListToken<Handle>>) -> R) -> R {
+        if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
+            let node = Node::new(Handle::Sync(ThreadParker::const_new()));
             let token = pin!(self.inner.build_token(node.into()));
             return f(&token);
         }
 
         thread_local! {
-            static NODE: Node<Parker> = const {Node::new(Parker::new())}
+            static NODE: Node<Handle> = const {Node::new(Handle::Sync(ThreadParker::const_new()))}
         }
         NODE.with(|node| {
             let token = pin!(self.inner.build_token(node.into()));
@@ -119,14 +192,23 @@ impl Event {
 
     pub fn wait_while(&self, should_sleep: impl Fn() -> bool, on_wake: impl Fn() -> bool) {
         self.with_thread_token(|token| {
-            token.inner().prepare_park();
+            let parker = token
+                .inner()
+                .thread_parker()
+                .expect("token should be a thread parker");
+            unsafe {
+                parker.prepare_park();
+            }
             while token.as_ref().push_if(&should_sleep) {
-                token.inner().park();
-                debug_assert_eq!(token.inner().get_state(), State::Notified);
+                unsafe {
+                    parker.park();
+                }
                 if !on_wake() {
                     return;
                 }
-                token.inner().prepare_park();
+                unsafe {
+                    parker.prepare_park();
+                }
             }
         });
     }
@@ -138,6 +220,10 @@ impl Event {
         timeout: Instant,
     ) -> bool {
         self.with_thread_token(|token| {
+            let parker = token
+                .inner()
+                .thread_parker()
+                .expect("token should be a thread parker");
             let did_time_out = Cell::new(false);
 
             // extend the will sleep function with timeout check code
@@ -154,9 +240,11 @@ impl Event {
                 return false;
             }
 
-            token.inner().prepare_park();
+            unsafe {
+                parker.prepare_park();
+            }
             while token.as_ref().push_if(will_sleep) {
-                let was_woken = token.inner().park_until(timeout);
+                let was_woken = unsafe { parker.park_until(timeout) };
                 if !was_woken {
                     //TODO it should be possible to test this using a similar method to the async abort
                     if token.revoke() {
@@ -165,13 +253,16 @@ impl Event {
                     // We have already been popped of the queue
                     // We need to wait for the notification so that the notify function doesn't
                     // access the data we are holding on our stack in the waker
-                    token.inner().park();
+                    unsafe {
+                        parker.park();
+                    }
                 }
-                debug_assert_eq!(token.inner().get_state(), State::Notified);
                 if !on_wake() {
                     return true;
                 }
-                token.inner().prepare_park();
+                unsafe {
+                    parker.prepare_park();
+                }
                 if Instant::now() >= timeout {
                     return false;
                 }
@@ -193,7 +284,7 @@ where
     event: &'a Event,
     will_sleep: S,
     on_wake: W,
-    list_token: ListToken<'a, Parker>,
+    list_token: ListToken<'a, Handle>,
     did_finish: bool,
     initialised: bool,
 }
@@ -232,26 +323,16 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
         if this.initialised {
-            let mut inner_state = this.list_token.inner().get_state();
-            if inner_state == State::Waiting && this.list_token.revoke() {
-                // This can happen when using tokio::select
-                // It seems to poll the future one last time even if the waker hasn't been called!
-                // TODO verify sure this is what is happening...
-                inner_state = State::Notified;
-            }
-
-            debug_assert!(!(inner_state != State::Notified), "we shouldn't hit this");
-
             if !(this.on_wake)() {
                 this.did_finish = true;
                 return Poll::Ready(());
             }
+            this.list_token.revoke();
         }
         this.list_token.inner().replace_waker(cx.waker().clone());
         this.initialised = true;
 
         let pinned_token = unsafe { Pin::new_unchecked(&this.list_token) };
-        pinned_token.inner().prepare_park();
         let did_push = pinned_token.push_if(&this.will_sleep);
         if did_push {
             Poll::Pending
@@ -301,7 +382,7 @@ mod tests {
     async fn test_async_timeout() {
         let event = Event::new();
         tokio::select! {
-            _ = event.wait_while_async(|| true, || false) => panic!("should have timed out"),
+            _ = event.wait_while_async(|| true, || true) => panic!("should have timed out"),
             _ = tokio::time::sleep(Duration::from_millis(5)) => {}
         }
     }

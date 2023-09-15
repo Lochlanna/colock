@@ -15,7 +15,7 @@
 mod atomic_const_ptr;
 mod spinwait;
 
-use parking::Parker;
+use parking::{ThreadParker, ThreadParkerT};
 use spinwait::SpinWait;
 use std::cell::{Cell, UnsafeCell};
 use std::ops::{Deref, DerefMut};
@@ -31,13 +31,13 @@ const PTR_MASK: usize = !LOCKED_BIT;
 
 #[repr(align(2))]
 struct Node {
-    parker: Parker,
+    parker: ThreadParker,
     next: Cell<*mut Self>,
 }
 
 impl Node {
     /// Creates a new node with the given parker
-    const fn new(parker: Parker) -> Self {
+    const fn new(parker: ThreadParker) -> Self {
         Self {
             parker,
             next: Cell::new(null_mut()),
@@ -200,7 +200,7 @@ impl<T> MiniLock<T> {
                 return guard;
             }
             //push onto the queue
-            node.parker.prepare_park();
+            unsafe { node.parker.prepare_park() };
             self.push(node);
 
             if let Some(guard) = self.try_lock() {
@@ -211,7 +211,7 @@ impl<T> MiniLock<T> {
                 return guard;
             }
 
-            node.parker.park();
+            unsafe { node.parker.park() };
             debug_assert_eq!(self.head.load(Ordering::Relaxed) & LOCKED_BIT, LOCKED_BIT);
 
             MiniLockGuard { inner: self }
@@ -222,12 +222,12 @@ impl<T> MiniLock<T> {
     /// The node might be constructed or it might be a thread local.
     #[inline]
     fn with_node<R>(f: impl FnOnce(&Node) -> R) -> R {
-        if Parker::is_cheap_to_construct() {
-            let node = Node::new(Parker::new());
+        if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
+            let node = Node::new(ThreadParker::const_new());
             return f(&node);
         }
         thread_local! {
-            static NODE: Node = const {Node::new(Parker::new())};
+            static NODE: Node = const {Node::new(ThreadParker::const_new())};
         }
         NODE.with(f)
     }
@@ -283,7 +283,9 @@ impl<T> MiniLock<T> {
             if let Some(node) = self.pop() {
                 // we got a waiter!
                 // the lock is locked, we are passing it to the waking thread!
-                node.parker.unpark_handle().un_park();
+                unsafe {
+                    node.parker.unpark();
+                }
                 return true;
             }
         }
