@@ -19,7 +19,6 @@ use parking::{ThreadParker, ThreadParkerT};
 use spinwait::SpinWait;
 use std::cell::{Cell, UnsafeCell};
 use std::ops::{Deref, DerefMut};
-use std::pin::{pin, Pin};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -296,6 +295,7 @@ impl<T> MiniLock<T> {
     }
 }
 
+/// A guard that will unlock the mutex when dropped and allows access to the data via [`Deref`] and [`DerefMut`]
 pub struct MiniLockGuard<'lock, T> {
     inner: &'lock MiniLock<T>,
 }

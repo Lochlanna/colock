@@ -20,11 +20,10 @@ enum Handle {
 }
 
 impl Debug for Handle {
-    //TODO can we do more/better here..?
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Handle::Sync(_) => write!(f, "Handle::Sync"),
-            Handle::Async(_) => write!(f, "Handle::Async"),
+            Self::Sync(_) => write!(f, "Handle::Sync"),
+            Self::Async(_) => write!(f, "Handle::Async"),
         }
     }
 }
@@ -385,6 +384,7 @@ mod tests {
             _ = event.wait_while_async(|| true, || true) => panic!("should have timed out"),
             _ = tokio::time::sleep(Duration::from_millis(5)) => {}
         }
+        assert_eq!(event.num_waiting(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]

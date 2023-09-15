@@ -66,7 +66,9 @@ where
 
     #[inline]
     pub async fn lock_async(&self) -> MutexGuard<'_, T> {
-        self.raw.lock_async().await;
+        if !self.raw.try_lock() {
+            self.raw.lock_async().await;
+        }
         MutexGuard { mutex: self }
     }
 }

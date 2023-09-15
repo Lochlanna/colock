@@ -33,7 +33,6 @@ where
     }
 }
 
-unsafe impl<T> Sync for IntrusiveLinkedList<T> {}
 impl<T> IntrusiveLinkedList<T> {
     #[must_use]
     pub const fn new() -> Self {
@@ -112,8 +111,8 @@ impl<T> IntrusiveLinkedListInner<T> {
     const fn new() -> Self {
         Self {
             head: core::ptr::null(),
-            length: 0,
             tail: core::ptr::null(),
+            length: 0,
         }
     }
 
@@ -186,6 +185,7 @@ where
         let mut current = self.head;
         let mut next_str = String::from("\n");
         while !current.is_null() {
+            // Safety: we've checked for current not null
             let current_ref = unsafe { &*current };
             next_str.push_str(format!("\t↑ {:?}\n", current_ref.prev.get()).as_str());
             output.push_str(
