@@ -161,8 +161,7 @@ impl Event {
             list_token: self
                 .inner
                 .build_token(MaybeRef::Owned(Node::new(Handle::Async(Cell::new(None))))),
-            did_finish: false,
-            initialised: false,
+            token_on_queue: false,
         }
     }
 
@@ -294,8 +293,7 @@ where
     will_sleep: S,
     should_wake: W,
     list_token: ListToken<'a, Handle>,
-    did_finish: bool,
-    initialised: bool,
+    token_on_queue: bool,
 }
 
 unsafe impl<S, W> Send for Poller<'_, S, W>
@@ -311,13 +309,10 @@ where
     W: Fn() -> bool + Send,
 {
     fn drop(&mut self) {
-        if self.did_finish {
-            unsafe {
-                self.list_token.set_off_queue();
-            }
-            return;
+        unsafe {
+            self.list_token.set_off_queue();
         }
-        if self.initialised && !self.list_token.revoke() {
+        if self.token_on_queue && !self.list_token.revoke() {
             // Our waker was popped of the queue but we didn't get polled. This means the notification was lost
             // We have to blindly attempt to wake someone else. This could be expensive but should be rare!
             self.event.notify_one();
@@ -334,22 +329,24 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
-        if this.initialised {
+        if this.token_on_queue {
+            this.token_on_queue = false;
             if (this.should_wake)() {
-                this.did_finish = true;
                 return Poll::Ready(());
             }
-            this.list_token.revoke();
+            if !this.list_token.revoke() && (this.should_wake)() {
+                // our token has already been popped meaning we are about to be woken anyway. Since shoudl wake is true we can just return ready
+                return Poll::Ready(());
+            }
         }
         this.list_token.inner().replace_waker(cx.waker().clone());
-        this.initialised = true;
 
         let pinned_token = unsafe { Pin::new_unchecked(&this.list_token) };
         let did_push = pinned_token.push_if(&this.will_sleep);
         if did_push {
+            this.token_on_queue = true;
             Poll::Pending
         } else {
-            this.did_finish = true;
             Poll::Ready(())
         }
     }
