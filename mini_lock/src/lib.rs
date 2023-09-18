@@ -290,6 +290,7 @@ impl<T> MiniLock<T> {
         }
     }
 
+    /// Returns true if the mutex is locked
     pub fn is_locked(&self) -> bool {
         self.head.load(Ordering::Relaxed) & LOCKED_BIT == LOCKED_BIT
     }
@@ -312,6 +313,8 @@ impl<T> Deref for MiniLockGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
+        // SAFETY: we have exclusive access to the data as LockGuard is only given out
+        // when the lock is held
         unsafe { &*self.inner.data.get() }
     }
 }
@@ -319,7 +322,7 @@ impl<T> Deref for MiniLockGuard<'_, T> {
 impl<T> DerefMut for MiniLockGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: we have exclusive access to the data as LockGuard is only given out
-        // when the lock is held and is not Sync
+        // when the lock is held
         unsafe { &mut *self.inner.data.get() }
     }
 }

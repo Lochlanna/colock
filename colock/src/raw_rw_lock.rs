@@ -73,7 +73,7 @@ impl RawRWLock {
         }
     }
 
-    const fn on_wake_shared(&self) -> impl Fn() -> bool + '_ {
+    const fn should_wake_shared(&self) -> impl Fn() -> bool + '_ {
         || {
             let mut state = self.state.load(Ordering::Relaxed);
             self.lock_shared_once(&mut state)
@@ -87,14 +87,21 @@ unsafe impl lock_api::RawRwLock for RawRWLock {
     type GuardMarker = ();
 
     fn lock_shared(&self) {
-        let mut state = self.state.load(Ordering::Relaxed);
+        let Err(mut state) =
+            self.state
+                .compare_exchange_weak(0, SHARED_LOCK, Ordering::Acquire, Ordering::Relaxed)
+        else {
+            return;
+        };
         // if it's not write locked and there are no writers waiting we are allowed to grab the shared lock
         if self.lock_shared_once(&mut state) {
             return;
         }
         // we failed to grab the lock, so we need to wait
-        self.read_queue
-            .wait_while(self.conditional_register_shared(), self.on_wake_shared());
+        self.read_queue.wait_while(
+            self.conditional_register_shared(),
+            self.should_wake_shared(),
+        );
     }
 
     fn try_lock_shared(&self) -> bool {

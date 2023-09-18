@@ -9,7 +9,10 @@ pub struct Mutex<T: ?Sized> {
     data: UnsafeCell<T>,
 }
 
+/// Safety: `Mutex` provides Sync over T through [`RawMutex`].
 unsafe impl<T> Sync for Mutex<T> where T: ?Sized {}
+
+/// Safety: `Mutex` is `Send` if `T` is `Send`.
 unsafe impl<T> Send for Mutex<T> where T: ?Sized + Send {}
 
 impl<T> Mutex<T> {
@@ -26,6 +29,7 @@ impl<T> Mutex<T> {
     }
 
     pub fn get_mut(&mut self) -> &mut T {
+        // Safety: We have exclusive access to the mutex because we have a mutable reference to it.
         unsafe { &mut *self.data.get() }
     }
 

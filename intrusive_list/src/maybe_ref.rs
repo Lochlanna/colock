@@ -7,6 +7,7 @@ pub enum MaybeRef<'a, T> {
     Boxed(Box<T>),
 }
 
+/// SAFETY: This is safe because `MaybeRef` is `Send` if `T` is `Send`.
 unsafe impl<T> Send for MaybeRef<'_, T> where T: Send {}
 
 impl<'a, T> MaybeRef<'a, T> {
