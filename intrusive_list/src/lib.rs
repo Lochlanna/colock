@@ -89,8 +89,8 @@ impl<T> IntrusiveLinkedList<T>
 where
     T: Clone,
 {
-    pub fn to_vec(&self) -> Vec<T> {
-        self.inner.lock().to_vec()
+    pub fn clone_to_vec(&self) -> Vec<T> {
+        self.inner.lock().clone_to_vec()
     }
 
     /// helper function that pops the tail and clones it
@@ -155,7 +155,7 @@ where
 {
     /// helper function that clones the items from the list into a vector.
     /// Items are cloned from the head first.
-    fn to_vec(&self) -> Vec<T> {
+    fn clone_to_vec(&self) -> Vec<T> {
         let mut data = Vec::new();
         if self.head.is_null() {
             return data;
@@ -405,7 +405,7 @@ mod tests {
         node_b.as_ref().push();
         let node_c = pin!(queue.build_token(Node::new(21).into()));
         node_c.as_ref().push();
-        let elements = queue.to_vec();
+        let elements = queue.clone_to_vec();
         assert_eq!(elements, vec![21, 42, 32]);
         println!("queue: {queue:?}");
     }
@@ -419,10 +419,10 @@ mod tests {
         node_b.as_ref().push();
         let node_c = pin!(queue.build_token(Node::new(21).into()));
         node_c.as_ref().push();
-        let elements = queue.to_vec();
+        let elements = queue.clone_to_vec();
         assert_eq!(elements, vec![21, 42, 32]);
         node_c.revoke();
-        let elements = queue.to_vec();
+        let elements = queue.clone_to_vec();
         assert_eq!(elements, vec![42, 32]);
 
         assert!(node_a.node.prev.get().not_null());
@@ -444,10 +444,10 @@ mod tests {
         node_b.as_ref().push();
         let node_c = pin!(queue.build_token(Node::new(21).into()));
         node_c.as_ref().push();
-        let elements = queue.to_vec();
+        let elements = queue.clone_to_vec();
         assert_eq!(elements, vec![21, 42, 32]);
         node_a.revoke();
-        let elements = queue.to_vec();
+        let elements = queue.clone_to_vec();
         assert_eq!(elements, vec![21, 42]);
 
         assert!(node_a.node.prev.get().is_null());
@@ -469,11 +469,11 @@ mod tests {
         node_b.as_ref().push();
         let node_c = pin!(queue.build_token(Node::new(21).into()));
         node_c.as_ref().push();
-        let elements = queue.to_vec();
+        let elements = queue.clone_to_vec();
 
         assert_eq!(elements, vec![21, 42, 32]);
         node_b.revoke();
-        let elements = queue.to_vec();
+        let elements = queue.clone_to_vec();
         assert_eq!(elements, vec![21, 32]);
 
         assert!(node_a.node.prev.get().not_null());
@@ -497,9 +497,9 @@ mod tests {
             node_b.as_ref().push();
             node_c.as_ref().push();
 
-            assert_eq!(queue.to_vec(), vec![21, 42, 32]);
+            assert_eq!(queue.clone_to_vec(), vec![21, 42, 32]);
         }
-        assert_eq!(queue.to_vec(), vec![21, 32]);
+        assert_eq!(queue.clone_to_vec(), vec![21, 32]);
     }
 
     #[test]
@@ -511,7 +511,7 @@ mod tests {
         node_b.as_ref().push();
         let node_c = pin!(queue.build_token(Node::new(21).into()));
         node_c.as_ref().push();
-        assert_eq!(queue.to_vec(), vec![21, 42, 32]);
+        assert_eq!(queue.clone_to_vec(), vec![21, 42, 32]);
 
         queue.pop_if(
             |v, len| {
@@ -521,7 +521,7 @@ mod tests {
             },
             || panic!("shouldn't fail"),
         );
-        assert_eq!(queue.to_vec(), vec![21, 42]);
+        assert_eq!(queue.clone_to_vec(), vec![21, 42]);
         queue.pop_if(
             |v, len| {
                 assert_eq!(*v, 42);
@@ -530,7 +530,7 @@ mod tests {
             },
             || panic!("shouldn't fail"),
         );
-        assert_eq!(queue.to_vec(), vec![21]);
+        assert_eq!(queue.clone_to_vec(), vec![21]);
         queue.pop_if(
             |v, len| {
                 assert_eq!(*v, 21);
@@ -539,7 +539,7 @@ mod tests {
             },
             || panic!("shouldn't fail"),
         );
-        assert_eq!(queue.to_vec(), vec![]);
+        assert_eq!(queue.clone_to_vec(), vec![]);
         let did_fail = Cell::new(false);
         queue.pop_if(
             |_v, _len| -> Option<()> { panic!("shouldn't pop") },
