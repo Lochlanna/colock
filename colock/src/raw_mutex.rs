@@ -99,29 +99,29 @@ impl RawMutex {
         }
     }
 
-    const fn spin_on_wake(&self) -> impl Fn() -> bool + '_ {
+    const fn should_wake_spin(&self) -> impl Fn() -> bool + '_ {
         || {
             let mut state = self.state.load(Ordering::Relaxed);
             if state & FAIR_BIT == FAIR_BIT {
                 // we are fair unlocking
                 let old = self.state.fetch_and(!FAIR_BIT, Ordering::Relaxed);
                 debug_assert_eq!(old, LOCKED_BIT | FAIR_BIT);
-                return false;
+                return true;
             }
-            !self.try_lock_spin(&mut state)
+            self.try_lock_spin(&mut state)
         }
     }
 
-    const fn try_on_wake(&self) -> impl Fn() -> bool + '_ {
+    const fn should_wake(&self) -> impl Fn() -> bool + '_ {
         || {
             let mut state = self.state.load(Ordering::Relaxed);
             if state & FAIR_BIT == FAIR_BIT {
                 // we are fair unlocking
                 let old = self.state.fetch_and(!FAIR_BIT, Ordering::Relaxed);
                 debug_assert_eq!(old, LOCKED_BIT | FAIR_BIT);
-                return false;
+                return true;
             }
-            !self.try_lock_once(&mut state)
+            self.try_lock_once(&mut state)
         }
     }
 
@@ -164,7 +164,7 @@ impl RawMutex {
         }
         // use try on wake rather than spin try on wake
         self.queue
-            .wait_while_async(self.should_sleep(), self.try_on_wake())
+            .wait_while_async(self.should_sleep(), self.should_wake())
             .await;
     }
 }
@@ -186,7 +186,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
             return;
         }
         self.queue
-            .wait_while(self.should_sleep(), self.spin_on_wake());
+            .wait_while(self.should_sleep(), self.should_wake_spin());
     }
 
     #[inline]
@@ -255,7 +255,7 @@ unsafe impl lock_api::RawMutexTimed for RawMutex {
             return true;
         }
         self.queue
-            .wait_while_until(self.should_sleep(), self.spin_on_wake(), timeout)
+            .wait_while_until(self.should_sleep(), self.should_wake_spin(), timeout)
     }
 }
 

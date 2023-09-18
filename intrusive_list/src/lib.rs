@@ -69,7 +69,7 @@ impl<T> IntrusiveLinkedList<T> {
         T: 'a,
     {
         ListToken {
-            is_pushed: Cell::new(false),
+            is_on_queue: Cell::new(false),
             queue: self,
             node,
             _unpin: core::marker::PhantomPinned,
@@ -311,7 +311,7 @@ impl<T> Node<T> {
 /// Once the token has been pushed to the list it cannot be moved again. Even if it's revoked.
 #[derive(Debug)]
 pub struct ListToken<'a, T> {
-    is_pushed: Cell<bool>,
+    is_on_queue: Cell<bool>,
     queue: &'a IntrusiveLinkedList<T>,
     node: MaybeRef<'a, Node<T>>,
     _unpin: core::marker::PhantomPinned,
@@ -321,7 +321,7 @@ impl<T> Drop for ListToken<'_, T> {
     fn drop(&mut self) {
         // it's possible that the node isn't actually on the queue even if is_pushed is true
         // it's never possible that it's on the queue if is_pushed is false
-        if self.is_pushed.get() {
+        if self.is_on_queue.get() {
             self.revoke();
         }
     }
@@ -335,7 +335,7 @@ impl<T> ListToken<'_, T> {
 
     /// Conditionally push the node onto the front of the queue.
     pub fn push_if(self: Pin<&Self>, condition: impl FnOnce() -> bool) -> bool {
-        self.is_pushed.set(true);
+        self.is_on_queue.set(true);
         let mut queue = self.queue.inner.lock();
         self.node.push_if(&mut queue, condition)
     }
@@ -345,7 +345,7 @@ impl<T> ListToken<'_, T> {
     /// Returns true if the node was on the queue and was revoked.
     /// Returns false if the node was not on the queue.
     pub fn revoke(&self) -> bool {
-        self.is_pushed.set(false);
+        self.is_on_queue.set(false);
         let mut queue = self.queue.inner.lock();
         self.node.revoke(&mut queue)
     }
@@ -355,10 +355,11 @@ impl<T> ListToken<'_, T> {
         &self.node.data
     }
 
-    /// Unsafe as this will cause the drop code to not attempt to revoke the node from the queue.
+    /// # Safety
+    /// this will cause the drop code to not attempt to revoke the node from the queue.
     /// If the node isn't actually off the queue this can result in a use after free
     pub unsafe fn set_off_queue(&self) {
-        self.is_pushed.set(false);
+        self.is_on_queue.set(false);
     }
 }
 

@@ -70,17 +70,14 @@ enum UnparkHandle {
 }
 
 impl UnparkHandle {
-    unsafe fn unpark(self) -> bool {
+    unsafe fn unpark(self) {
         match self {
             Self::Sync(thread_parker) => {
                 (*thread_parker).unpark();
-                //TODO unpark could also return a bool..?
-                true
             }
-            Self::Async(maybe_waker) => maybe_waker.map_or(false, |waker| {
-                waker.wake();
-                true
-            }),
+            Self::Async(maybe_waker) => maybe_waker
+                .expect("should always have a waker. Node was re-used")
+                .wake(),
         }
     }
 }
@@ -152,7 +149,7 @@ impl Event {
         false
     }
 
-    pub const fn wait_while_async<S, W>(&self, will_sleep: S, on_wake: W) -> Poller<'_, S, W>
+    pub const fn wait_while_async<S, W>(&self, will_sleep: S, should_wake: W) -> Poller<'_, S, W>
     where
         S: Fn() -> bool + Send,
         W: Fn() -> bool + Send,
@@ -160,7 +157,7 @@ impl Event {
         Poller {
             event: self,
             will_sleep,
-            on_wake,
+            should_wake,
             list_token: self
                 .inner
                 .build_token(MaybeRef::Owned(Node::new(Handle::Async(Cell::new(None))))),
@@ -170,7 +167,7 @@ impl Event {
     }
 
     pub fn wait_once(&self, will_sleep: impl Fn() -> bool) {
-        self.wait_while(will_sleep, || false);
+        self.wait_while(will_sleep, || true);
     }
 
     fn with_thread_token<R>(&self, f: impl FnOnce(&Pin<&mut ListToken<Handle>>) -> R) -> R {
@@ -190,7 +187,7 @@ impl Event {
     }
 
     //TODO refactor so there's one inner wait while func with optional timeout to reduce code replication
-    pub fn wait_while(&self, should_sleep: impl Fn() -> bool, on_wake: impl Fn() -> bool) {
+    pub fn wait_while(&self, should_sleep: impl Fn() -> bool, should_wake: impl Fn() -> bool) {
         self.with_thread_token(|token| {
             let parker = token
                 .inner()
@@ -207,7 +204,7 @@ impl Event {
                     // This is an optimisation that means it won't try to revoke itself on drop
                     token.as_ref().set_off_queue();
                 }
-                if !on_wake() {
+                if should_wake() {
                     return;
                 }
                 unsafe {
@@ -220,7 +217,7 @@ impl Event {
     pub fn wait_while_until(
         &self,
         should_sleep: impl Fn() -> bool,
-        on_wake: impl Fn() -> bool,
+        should_wake: impl Fn() -> bool,
         timeout: Instant,
     ) -> bool {
         self.with_thread_token(|token| {
@@ -269,7 +266,7 @@ impl Event {
                     // This is an optimisation that means it won't try to revoke itself on drop
                     token.as_ref().set_off_queue();
                 }
-                if !on_wake() {
+                if should_wake() {
                     return true;
                 }
                 unsafe {
@@ -295,7 +292,7 @@ where
 {
     event: &'a Event,
     will_sleep: S,
-    on_wake: W,
+    should_wake: W,
     list_token: ListToken<'a, Handle>,
     did_finish: bool,
     initialised: bool,
@@ -338,7 +335,7 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
         if this.initialised {
-            if !(this.on_wake)() {
+            if (this.should_wake)() {
                 this.did_finish = true;
                 return Poll::Ready(());
             }
@@ -386,7 +383,7 @@ mod tests {
             });
             assert!(!test_val.load(Ordering::SeqCst));
             barrier.wait();
-            event.wait_while(|| true, || false);
+            event.wait_while(|| true, || true);
             assert!(test_val.load(Ordering::SeqCst));
         });
     }
@@ -397,7 +394,7 @@ mod tests {
     async fn test_async_timeout() {
         let event = Event::new();
         tokio::select! {
-            _ = event.wait_while_async(|| true, || true) => panic!("should have timed out"),
+            _ = event.wait_while_async(|| true, || false) => panic!("should have timed out"),
             _ = tokio::time::sleep(Duration::from_millis(5)) => {}
         }
         assert_eq!(event.num_waiting(), 0);
@@ -425,7 +422,7 @@ mod tests {
         let handle_b = tokio::spawn(async move {
             assert!(!test_data_cloned.1.load(Ordering::SeqCst));
             test_data_cloned.2.wait().await;
-            test_data_cloned.0.wait_while_async(|| true, || false).await;
+            test_data_cloned.0.wait_while_async(|| true, || true).await;
             assert!(test_data_cloned.1.load(Ordering::SeqCst));
         });
 
@@ -440,7 +437,7 @@ mod tests {
     async fn cancel_async() {
         let event = Event::new();
         {
-            let poller = pin!(event.wait_while_async(|| true, || false));
+            let poller = pin!(event.wait_while_async(|| true, || true));
             let mut polling = poller.polling();
             let result = polling.poll_once().await;
             assert_eq!(result, Poll::Pending);
@@ -459,7 +456,7 @@ mod tests {
         let second_entry;
         let mut second_polling;
         {
-            let poller = pin!(event.wait_while_async(|| true, || false));
+            let poller = pin!(event.wait_while_async(|| true, || true));
             let mut polling = poller.polling();
             let result = polling.poll_once().await;
             assert_eq!(result, Poll::Pending);
@@ -467,7 +464,7 @@ mod tests {
             event
                 .inner
                 .pop_if(|_, _| Some(()), || panic!("shouldn't be empty"));
-            second_entry = Box::pin(event.wait_while_async(|| true, || false));
+            second_entry = Box::pin(event.wait_while_async(|| true, || true));
             second_polling = second_entry.polling();
             let result = second_polling.poll_once().await;
             assert_eq!(result, Poll::Pending);
@@ -488,7 +485,7 @@ mod tests {
                 let barrier = barrier.clone();
                 thread::spawn(move || {
                     barrier.wait();
-                    event.wait_while(|| true, || false);
+                    event.wait_while(|| true, || true);
                 })
             })
             .collect_vec();
