@@ -354,6 +354,12 @@ impl<T> ListToken<'_, T> {
     pub fn inner(&self) -> &T {
         &self.node.data
     }
+
+    /// Unsafe as this will cause the drop code to not attempt to revoke the node from the queue.
+    /// If the node isn't actually off the queue this can result in a use after free
+    pub unsafe fn set_off_queue(&self) {
+        self.is_pushed.set(false);
+    }
 }
 
 #[cfg(test)]

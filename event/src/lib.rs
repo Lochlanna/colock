@@ -189,6 +189,7 @@ impl Event {
         })
     }
 
+    //TODO refactor so there's one inner wait while func with optional timeout to reduce code replication
     pub fn wait_while(&self, should_sleep: impl Fn() -> bool, on_wake: impl Fn() -> bool) {
         self.with_thread_token(|token| {
             let parker = token
@@ -201,6 +202,10 @@ impl Event {
             while token.as_ref().push_if(&should_sleep) {
                 unsafe {
                     parker.park();
+                }
+                unsafe {
+                    // This is an optimisation that means it won't try to revoke itself on drop
+                    token.as_ref().set_off_queue();
                 }
                 if !on_wake() {
                     return;
@@ -236,6 +241,10 @@ impl Event {
             };
 
             if Instant::now() >= timeout {
+                unsafe {
+                    // This is an optimisation that means it won't try to revoke itself on drop
+                    token.as_ref().set_off_queue();
+                }
                 return false;
             }
 
@@ -255,6 +264,10 @@ impl Event {
                     unsafe {
                         parker.park();
                     }
+                }
+                unsafe {
+                    // This is an optimisation that means it won't try to revoke itself on drop
+                    token.as_ref().set_off_queue();
                 }
                 if !on_wake() {
                     return true;
@@ -302,6 +315,9 @@ where
 {
     fn drop(&mut self) {
         if self.did_finish {
+            unsafe {
+                self.list_token.set_off_queue();
+            }
             return;
         }
         if self.initialised && !self.list_token.revoke() {
