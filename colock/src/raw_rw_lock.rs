@@ -87,10 +87,12 @@ unsafe impl lock_api::RawRwLock for RawRWLock {
     type GuardMarker = ();
 
     fn lock_shared(&self) {
-        let Err(mut state) =
-            self.state
-                .compare_exchange_weak(0, SHARED_LOCK, Ordering::Acquire, Ordering::Relaxed)
-        else {
+        let Err(mut state) = self.state.compare_exchange_weak(
+            0,
+            SHARED_LOCK | ONE_READER,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ) else {
             return;
         };
         // if it's not write locked and there are no writers waiting we are allowed to grab the shared lock
