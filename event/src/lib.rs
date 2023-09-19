@@ -115,17 +115,17 @@ impl Event {
         if max == 0 {
             return 0;
         }
-        let max = Cell::new(max);
+        let num_waiting = Cell::new(max);
         let get_count = |num_in_queue| {
-            max.set(max.get().min(num_in_queue));
+            num_waiting.set(num_waiting.get().min(num_in_queue));
             condition(num_in_queue)
         };
         if !self.notify_if(get_count, &on_empty) {
             return 0;
         }
         let mut num_notified = 1;
-        let max = max.get();
-        while num_notified < max && self.notify_if(&condition, &on_empty) {
+        let max = num_waiting.get();
+        while num_notified < max && num_waiting.get() > 0 && self.notify_if(get_count, &on_empty) {
             num_notified += 1;
         }
 
