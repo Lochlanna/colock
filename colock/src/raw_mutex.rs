@@ -207,7 +207,10 @@ unsafe impl lock_api::RawMutex for RawMutex {
             return;
         }
 
-        self.queue.notify_if(self.conditional_notify(), || {});
+        self.queue.notify_if(self.conditional_notify(), || {
+            //clear the wait bit
+            self.state.fetch_and(!WAIT_BIT, Ordering::Relaxed);
+        });
     }
 
     fn is_locked(&self) -> bool {

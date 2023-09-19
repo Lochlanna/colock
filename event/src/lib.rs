@@ -94,7 +94,7 @@ impl Event {
             inner: IntrusiveLinkedList::new(),
         }
     }
-    pub fn notify_one(&self) -> bool {
+    fn notify_one(&self) -> bool {
         self.notify_if(|_| true, || {})
     }
 
