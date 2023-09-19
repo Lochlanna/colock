@@ -149,6 +149,7 @@ impl Event {
         false
     }
 
+    #[must_use]
     pub const fn wait_while_async<S, W>(&self, will_sleep: S, should_wake: W) -> Poller<'_, S, W>
     where
         S: Fn(usize) -> bool + Send,

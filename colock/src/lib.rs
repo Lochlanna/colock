@@ -6,6 +6,7 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod barrier;
+pub mod condvar;
 pub mod mutex;
 pub mod raw_mutex;
 mod raw_rw_lock;

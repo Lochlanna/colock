@@ -116,6 +116,15 @@ where
     }
 }
 
+impl<T> MutexGuard<'_, T>
+where
+    T: ?Sized,
+{
+    pub(crate) fn get_raw_mutex(&self) -> &RawMutex {
+        &self.mutex.raw
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
