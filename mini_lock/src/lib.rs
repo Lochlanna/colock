@@ -20,7 +20,7 @@ use spinwait::SpinWait;
 use std::cell::{Cell, UnsafeCell};
 use std::ops::{Deref, DerefMut};
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 /// `LOCKED_BIT` is the bit that is set when the lock is locked
 const LOCKED_BIT: usize = 0b1;
@@ -31,7 +31,7 @@ const PTR_MASK: usize = !LOCKED_BIT;
 #[repr(align(2))]
 struct Node {
     parker: ThreadParker,
-    next: Cell<*mut Self>,
+    next: AtomicPtr<Self>,
 }
 
 impl Node {
@@ -39,7 +39,7 @@ impl Node {
     const fn new(parker: ThreadParker) -> Self {
         Self {
             parker,
-            next: Cell::new(null_mut()),
+            next: AtomicPtr::new(null_mut()),
         }
     }
 }
@@ -83,7 +83,8 @@ impl<T> MiniLock<T> {
     fn push(&self, node: &Node) {
         let mut head = self.head.load(Ordering::Acquire);
         loop {
-            node.next.set((head & PTR_MASK) as *mut Node);
+            node.next
+                .store((head & PTR_MASK) as *mut Node, Ordering::Relaxed);
             let target = node as *const _ as usize | (head & LOCKED_BIT);
             if let Err(new_head) =
                 self.head
@@ -108,7 +109,7 @@ impl<T> MiniLock<T> {
         debug_assert_eq!(self.head.load(Ordering::Acquire) & LOCKED_BIT, LOCKED_BIT);
         let Err(head) = self.head.compare_exchange(
             node_ptr as usize | LOCKED_BIT,
-            node.next.get() as usize | LOCKED_BIT,
+            node.next.load(Ordering::Relaxed) as usize | LOCKED_BIT,
             Ordering::Relaxed,
             Ordering::Relaxed,
         ) else {
@@ -123,12 +124,14 @@ impl<T> MiniLock<T> {
         while current_ptr.cast_const() != node_ptr {
             let current = unsafe { &*current_ptr };
             prev = current_ptr;
-            current_ptr = current.next.get();
+            current_ptr = current.next.load(Ordering::Relaxed);
         }
 
         debug_assert!(!prev.is_null());
         unsafe {
-            (*prev).next.set(node.next.get());
+            (*prev)
+                .next
+                .store(node.next.load(Ordering::Relaxed), Ordering::Relaxed);
         }
     }
 
@@ -151,7 +154,7 @@ impl<T> MiniLock<T> {
             debug_assert_ne!(head_ptr, null_mut());
             // SAFETY: we know that the head is not null as we checked for that above
             let head_ref = unsafe { &*head_ptr };
-            let next = head_ref.next.get() as usize | LOCKED_BIT;
+            let next = head_ref.next.load(Ordering::Relaxed) as usize | LOCKED_BIT;
             if let Err(new_head) =
                 self.head
                     .compare_exchange_weak(head, next, Ordering::Relaxed, Ordering::Relaxed)
