@@ -151,7 +151,7 @@ impl Event {
 
     pub const fn wait_while_async<S, W>(&self, will_sleep: S, should_wake: W) -> Poller<'_, S, W>
     where
-        S: Fn() -> bool + Send,
+        S: Fn(usize) -> bool + Send,
         W: Fn() -> bool + Send,
     {
         Poller {
@@ -165,7 +165,7 @@ impl Event {
         }
     }
 
-    pub fn wait_once(&self, will_sleep: impl Fn() -> bool) {
+    pub fn wait_once(&self, will_sleep: impl Fn(usize) -> bool) {
         self.wait_while(will_sleep, || true);
     }
 
@@ -186,7 +186,7 @@ impl Event {
     }
 
     //TODO refactor so there's one inner wait while func with optional timeout to reduce code replication
-    pub fn wait_while(&self, should_sleep: impl Fn() -> bool, should_wake: impl Fn() -> bool) {
+    pub fn wait_while(&self, should_sleep: impl Fn(usize) -> bool, should_wake: impl Fn() -> bool) {
         self.with_thread_token(|token| {
             let parker = token
                 .inner()
@@ -215,7 +215,7 @@ impl Event {
 
     pub fn wait_while_until(
         &self,
-        should_sleep: impl Fn() -> bool,
+        should_sleep: impl Fn(usize) -> bool,
         should_wake: impl Fn() -> bool,
         timeout: Instant,
     ) -> bool {
@@ -227,13 +227,13 @@ impl Event {
             let did_time_out = Cell::new(false);
 
             // extend the will sleep function with timeout check code
-            let will_sleep = || {
+            let will_sleep = |num_waiting| {
                 let now = Instant::now();
                 if now >= timeout {
                     did_time_out.set(true);
                     return false;
                 }
-                should_sleep()
+                should_sleep(num_waiting)
             };
 
             if Instant::now() >= timeout {
@@ -286,7 +286,7 @@ impl Event {
 
 pub struct Poller<'a, S, W>
 where
-    S: Fn() -> bool + Send,
+    S: Fn(usize) -> bool + Send,
     W: Fn() -> bool + Send,
 {
     event: &'a Event,
@@ -298,14 +298,14 @@ where
 
 unsafe impl<S, W> Send for Poller<'_, S, W>
 where
-    S: Fn() -> bool + Send,
+    S: Fn(usize) -> bool + Send,
     W: Fn() -> bool + Send,
 {
 }
 
 impl<S, W> Drop for Poller<'_, S, W>
 where
-    S: Fn() -> bool + Send,
+    S: Fn(usize) -> bool + Send,
     W: Fn() -> bool + Send,
 {
     fn drop(&mut self) {
@@ -322,7 +322,7 @@ where
 
 impl<S, W> core::future::Future for Poller<'_, S, W>
 where
-    S: Fn() -> bool + Send,
+    S: Fn(usize) -> bool + Send,
     W: Fn() -> bool + Send,
 {
     type Output = ();
@@ -380,7 +380,7 @@ mod tests {
             });
             assert!(!test_val.load(Ordering::SeqCst));
             barrier.wait();
-            event.wait_while(|| true, || true);
+            event.wait_while(|_| true, || true);
             assert!(test_val.load(Ordering::SeqCst));
         });
     }
@@ -391,7 +391,7 @@ mod tests {
     async fn test_async_timeout() {
         let event = Event::new();
         tokio::select! {
-            _ = event.wait_while_async(|| true, || false) => panic!("should have timed out"),
+            _ = event.wait_while_async(|_| true, || false) => panic!("should have timed out"),
             _ = tokio::time::sleep(Duration::from_millis(5)) => {}
         }
         assert_eq!(event.num_waiting(), 0);
@@ -419,7 +419,7 @@ mod tests {
         let handle_b = tokio::spawn(async move {
             assert!(!test_data_cloned.1.load(Ordering::SeqCst));
             test_data_cloned.2.wait().await;
-            test_data_cloned.0.wait_while_async(|| true, || true).await;
+            test_data_cloned.0.wait_while_async(|_| true, || true).await;
             assert!(test_data_cloned.1.load(Ordering::SeqCst));
         });
 
@@ -434,7 +434,7 @@ mod tests {
     async fn cancel_async() {
         let event = Event::new();
         {
-            let poller = pin!(event.wait_while_async(|| true, || true));
+            let poller = pin!(event.wait_while_async(|_| true, || true));
             let mut polling = poller.polling();
             let result = polling.poll_once().await;
             assert_eq!(result, Poll::Pending);
@@ -453,7 +453,7 @@ mod tests {
         let second_entry;
         let mut second_polling;
         {
-            let poller = pin!(event.wait_while_async(|| true, || true));
+            let poller = pin!(event.wait_while_async(|_| true, || true));
             let mut polling = poller.polling();
             let result = polling.poll_once().await;
             assert_eq!(result, Poll::Pending);
@@ -461,7 +461,7 @@ mod tests {
             event
                 .inner
                 .pop_if(|_, _| Some(()), || panic!("shouldn't be empty"));
-            second_entry = Box::pin(event.wait_while_async(|| true, || true));
+            second_entry = Box::pin(event.wait_while_async(|_| true, || true));
             second_polling = second_entry.polling();
             let result = second_polling.poll_once().await;
             assert_eq!(result, Poll::Pending);
@@ -482,7 +482,7 @@ mod tests {
                 let barrier = barrier.clone();
                 thread::spawn(move || {
                     barrier.wait();
-                    event.wait_while(|| true, || true);
+                    event.wait_while(|_| true, || true);
                 })
             })
             .collect_vec();

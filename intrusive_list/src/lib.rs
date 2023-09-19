@@ -229,15 +229,15 @@ impl<T> Node<T> {
 
     /// helper method to unconditionally push the node to the front of the queue
     fn push(&self, queue: &mut IntrusiveLinkedListInner<T>) {
-        self.push_if(queue, || true);
+        self.push_if(queue, |_| true);
     }
 
     fn push_if(
         &self,
         queue: &mut IntrusiveLinkedListInner<T>,
-        condition: impl FnOnce() -> bool,
+        condition: impl FnOnce(usize) -> bool,
     ) -> bool {
-        if !condition() {
+        if !condition(queue.length) {
             debug_assert!(!self.is_on_queue.get());
             return false;
         }
@@ -330,11 +330,11 @@ impl<T> Drop for ListToken<'_, T> {
 impl<T> ListToken<'_, T> {
     /// Push the node onto the front of the queue.
     pub fn push(self: Pin<&Self>) {
-        self.push_if(|| true);
+        self.push_if(|_| true);
     }
 
     /// Conditionally push the node onto the front of the queue.
-    pub fn push_if(self: Pin<&Self>, condition: impl FnOnce() -> bool) -> bool {
+    pub fn push_if(self: Pin<&Self>, condition: impl FnOnce(usize) -> bool) -> bool {
         self.is_on_queue.set(true);
         let mut queue = self.queue.inner.lock();
         self.node.push_if(&mut queue, condition)

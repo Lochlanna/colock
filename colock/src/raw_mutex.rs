@@ -68,8 +68,8 @@ impl RawMutex {
         false
     }
 
-    const fn should_sleep(&self) -> impl Fn() -> bool + '_ {
-        || {
+    const fn should_sleep(&self) -> impl Fn(usize) -> bool + '_ {
+        |_| {
             let mut state = self.state.load(Ordering::Relaxed);
             loop {
                 let (target, ordering) = match state {

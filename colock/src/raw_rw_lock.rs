@@ -61,8 +61,8 @@ impl RawRWLock {
         false
     }
 
-    const fn conditional_register_shared(&self) -> impl Fn() -> bool + '_ {
-        || {
+    const fn conditional_register_shared(&self) -> impl Fn(usize) -> bool + '_ {
+        |_| {
             let mut state = self.state.load(Ordering::Relaxed);
             loop {
                 let (target, ordering) = if state == 0 {
@@ -93,8 +93,8 @@ impl RawRWLock {
         }
     }
 
-    const fn conditional_register_exclusive(&self) -> impl Fn() -> bool + '_ {
-        || {
+    const fn conditional_register_exclusive(&self) -> impl Fn(usize) -> bool + '_ {
+        |_| {
             let mut state = self.state.load(Ordering::Relaxed);
             loop {
                 let (target, ordering) = if state & (SHARED_LOCK | EXCLUSIVE_LOCK) == 0 {

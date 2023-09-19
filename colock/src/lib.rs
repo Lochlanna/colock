@@ -5,6 +5,7 @@
 #![allow(clippy::module_name_repetitions)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 
+pub mod barrier;
 pub mod mutex;
 pub mod raw_mutex;
 mod raw_rw_lock;
