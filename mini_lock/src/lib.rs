@@ -20,8 +20,10 @@ use parking::{ThreadParker, ThreadParkerT};
 use spinwait::SpinWait;
 use std::cell::{Cell, UnsafeCell};
 use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 
 /// `LOCKED_BIT` is the bit that is set when the lock is locked
 const LOCKED_BIT: usize = 0b1;
@@ -209,6 +211,13 @@ impl<T> MiniLock<T> {
         self.lock_slow(head)
     }
 
+    pub const fn lock_async(&self) -> MiniLockPoller<'_, T> {
+        MiniLockPoller {
+            mini_lock: self,
+            node: None,
+        }
+    }
+
     /// Locks the mutex and returns a guard that will unlock it when dropped.
     fn lock_slow(&self, mut head: usize) -> MiniLockGuard<T> {
         let mut spin = SpinWait::<3, 7>::new();
@@ -357,9 +366,76 @@ impl<T> DerefMut for MiniLockGuard<'_, T> {
     }
 }
 
+pub struct MiniLockPoller<'a, T> {
+    mini_lock: &'a MiniLock<T>,
+    node: Option<Node>,
+}
+
+impl<'a, T> core::future::Future for MiniLockPoller<'a, T> {
+    type Output = MiniLockGuard<'a, T>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.node.is_some() {
+            debug_assert_eq!(
+                self.mini_lock.head.load(Ordering::Relaxed) & LOCKED_BIT,
+                LOCKED_BIT
+            );
+            return Poll::Ready(MiniLockGuard {
+                inner: self.mini_lock,
+            });
+        }
+
+        let Err(mut head) = self.mini_lock.head.compare_exchange(
+            0,
+            LOCKED_BIT,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ) else {
+            return Poll::Ready(MiniLockGuard {
+                inner: self.mini_lock,
+            });
+        };
+        while head & LOCKED_BIT == 0 {
+            if let Err(new_head) = self.mini_lock.head.compare_exchange_weak(
+                head & !LOCKED_BIT,
+                head | LOCKED_BIT,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                head = new_head;
+            } else {
+                return Poll::Ready(MiniLockGuard {
+                    inner: self.mini_lock,
+                });
+            }
+        }
+        self.node = Some(Node::new(TaskHandle::Task(Cell::new(Some(
+            cx.waker().clone(),
+        )))));
+        if let Some(guard) = self.mini_lock.try_lock() {
+            return Poll::Ready(guard);
+        }
+
+        let node = self.node.as_ref().unwrap();
+
+        self.mini_lock.push(node);
+
+        if let Some(guard) = self.mini_lock.try_lock() {
+            // SAFETY: we now hold the lock meaning that we are allowed to modify the queue
+            unsafe {
+                self.mini_lock.remove(node);
+            }
+            return Poll::Ready(guard);
+        }
+
+        Poll::Pending
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -393,6 +469,47 @@ mod tests {
             }
         });
         assert!(!mutex.is_locked());
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[tokio::test]
+    async fn it_works_async() {
+        let mutex = Arc::new(MiniLock::new(()));
+        let mutex_cloned = mutex.clone();
+        let mutex_cloned_2 = mutex.clone();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let barrier_cloned = barrier.clone();
+        let num_iterations = 10;
+
+        let handle_a = tokio::spawn(async move {
+            for _ in 0..num_iterations {
+                let guard = mutex.lock_async().await;
+                barrier.wait().await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                while mutex.head.load(Ordering::Relaxed) & PTR_MASK == 0 {
+                    tokio::task::yield_now().await;
+                }
+                drop(guard);
+                barrier.wait().await;
+            }
+        });
+
+        let handle_b = tokio::spawn(async move {
+            for _ in 0..num_iterations {
+                barrier_cloned.wait().await;
+                assert!(mutex_cloned.is_locked());
+                let start = Instant::now();
+                let guard = mutex_cloned.lock_async().await;
+                let elapsed = start.elapsed().as_millis();
+                assert!(elapsed >= 10);
+                drop(guard);
+                barrier_cloned.wait().await;
+            }
+        });
+
+        handle_a.await.unwrap();
+        handle_b.await.unwrap();
+        assert!(!mutex_cloned_2.is_locked());
     }
 
     fn do_lots_and_lots(j: u64, k: u64) {
