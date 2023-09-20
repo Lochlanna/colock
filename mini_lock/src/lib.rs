@@ -15,6 +15,7 @@
 mod atomic_const_ptr;
 mod spinwait;
 
+use core::task::Waker;
 use parking::{ThreadParker, ThreadParkerT};
 use spinwait::SpinWait;
 use std::cell::{Cell, UnsafeCell};
@@ -28,17 +29,43 @@ const LOCKED_BIT: usize = 0b1;
 /// `PTR_MASK` is the mask that is used to get the pointer to the head of the queue
 const PTR_MASK: usize = !LOCKED_BIT;
 
+enum TaskHandle {
+    Thread(ThreadParker),
+    Task(Cell<Option<Waker>>),
+}
+
+impl TaskHandle {
+    unsafe fn prepare_park(&self) {
+        if let Self::Thread(parker) = self {
+            parker.prepare_park();
+        }
+    }
+
+    unsafe fn park(&self) {
+        if let Self::Thread(parker) = self {
+            parker.park();
+        }
+    }
+
+    unsafe fn unpark(&self) {
+        match self {
+            Self::Thread(parker) => parker.unpark(),
+            Self::Task(waker) => waker.take().unwrap().wake(),
+        }
+    }
+}
+
 #[repr(align(2))]
 struct Node {
-    parker: ThreadParker,
+    handle: TaskHandle,
     next: AtomicPtr<Self>,
 }
 
 impl Node {
     /// Creates a new node with the given parker
-    const fn new(parker: ThreadParker) -> Self {
+    const fn new(handle: TaskHandle) -> Self {
         Self {
-            parker,
+            handle,
             next: AtomicPtr::new(null_mut()),
         }
     }
@@ -202,7 +229,7 @@ impl<T> MiniLock<T> {
                 return guard;
             }
             //push onto the queue
-            unsafe { node.parker.prepare_park() };
+            unsafe { node.handle.prepare_park() };
             self.push(node);
 
             if let Some(guard) = self.try_lock() {
@@ -213,7 +240,7 @@ impl<T> MiniLock<T> {
                 return guard;
             }
 
-            unsafe { node.parker.park() };
+            unsafe { node.handle.park() };
             debug_assert_eq!(self.head.load(Ordering::Relaxed) & LOCKED_BIT, LOCKED_BIT);
 
             MiniLockGuard { inner: self }
@@ -225,11 +252,11 @@ impl<T> MiniLock<T> {
     #[inline]
     fn with_node<R>(f: impl FnOnce(&Node) -> R) -> R {
         if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
-            let node = Node::new(ThreadParker::const_new());
+            let node = Node::new(TaskHandle::Thread(ThreadParker::const_new()));
             return f(&node);
         }
         thread_local! {
-            static NODE: Node = const {Node::new(ThreadParker::const_new())};
+            static NODE: Node = const {Node::new(TaskHandle::Thread(ThreadParker::const_new()))};
         }
         NODE.with(f)
     }
@@ -286,7 +313,7 @@ impl<T> MiniLock<T> {
                 // we got a waiter!
                 // the lock is locked, we are passing it to the waking thread!
                 unsafe {
-                    node.parker.unpark();
+                    node.handle.unpark();
                 }
                 return true;
             }
