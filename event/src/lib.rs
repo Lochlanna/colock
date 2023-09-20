@@ -9,9 +9,10 @@ use core::cell::Cell;
 use core::pin::{pin, Pin};
 use core::task::{Context, Poll, Waker};
 use intrusive_list::maybe_ref::MaybeRef;
-use intrusive_list::{IntrusiveLinkedList, ListToken, Node};
+use intrusive_list::{AsyncListToken, IntrusiveLinkedList, ListToken, Node};
 use parking::{ThreadParker, ThreadParkerT};
 use std::fmt::{Debug, Formatter};
+use std::future::Future;
 use std::time::Instant;
 
 enum Handle {
@@ -152,17 +153,15 @@ impl Event {
     #[must_use]
     pub const fn wait_while_async<S, W>(&self, will_sleep: S, should_wake: W) -> Poller<'_, S, W>
     where
-        S: Fn(usize) -> bool + Send,
+        S: Fn(usize) -> bool + Send + Sync,
         W: Fn() -> bool + Send,
     {
         Poller {
             event: self,
             will_sleep,
             should_wake,
-            list_token: self
-                .inner
-                .build_token(MaybeRef::Owned(Node::new(Handle::Async(Cell::new(None))))),
-            token_on_queue: false,
+            state: EventPollerState::Initial,
+            token: None,
         }
     }
 
@@ -285,70 +284,119 @@ impl Event {
     }
 }
 
+enum EventPollerState {
+    Initial,
+    Pushing,
+    Pushed,
+}
+
 pub struct Poller<'a, S, W>
 where
-    S: Fn(usize) -> bool + Send,
+    S: Fn(usize) -> bool + Send + Sync,
     W: Fn() -> bool + Send,
 {
     event: &'a Event,
     will_sleep: S,
     should_wake: W,
-    list_token: ListToken<'a, Handle>,
-    token_on_queue: bool,
+    state: EventPollerState,
+    token: Option<AsyncListToken<'a, Handle, &'a S>>,
+}
+
+impl<S, W> Unpin for Poller<'_, S, W>
+where
+    S: Fn(usize) -> bool + Send + Sync,
+    W: Fn() -> bool + Send,
+{
 }
 
 unsafe impl<S, W> Send for Poller<'_, S, W>
 where
-    S: Fn(usize) -> bool + Send,
+    S: Fn(usize) -> bool + Send + Sync,
     W: Fn() -> bool + Send,
 {
 }
 
 impl<S, W> Drop for Poller<'_, S, W>
 where
-    S: Fn(usize) -> bool + Send,
+    S: Fn(usize) -> bool + Send + Sync,
     W: Fn() -> bool + Send,
 {
     fn drop(&mut self) {
-        unsafe {
-            self.list_token.set_off_queue();
-        }
-        if self.token_on_queue && !self.list_token.revoke() {
-            // Our waker was popped of the queue but we didn't get polled. This means the notification was lost
-            // We have to blindly attempt to wake someone else. This could be expensive but should be rare!
-            self.event.notify_one();
+        match &self.state {
+            EventPollerState::Initial => {}
+            EventPollerState::Pushing => {}
+            EventPollerState::Pushed => {}
         }
     }
 }
 
-impl<S, W> core::future::Future for Poller<'_, S, W>
+impl<S, W> Poller<'_, S, W>
 where
-    S: Fn(usize) -> bool + Send,
+    S: Fn(usize) -> bool + Send + Sync,
+    W: Fn() -> bool + Send,
+{
+    fn on_initial(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        // we need to lock the inner list
+        let node = Node::new(Handle::Async(Cell::new(None)));
+        let token = self.event.inner.build_token(MaybeRef::Owned(node));
+        let will_sleep = unsafe { &*std::ptr::addr_of!(self.will_sleep) };
+        let poller = token.push_if_async(
+            |token, cx| {
+                token.inner().replace_waker(cx.waker().clone());
+            },
+            will_sleep,
+        );
+        self.token = Some(poller);
+        self.state = EventPollerState::Pushing;
+        self.on_pushing(cx)
+    }
+
+    fn on_pushing(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let Some(poller) = &mut self.token else {
+            unreachable!()
+        };
+        let poller = pin!(poller);
+        if let Poll::Ready(did_push) = poller.poll(cx) {
+            if did_push {
+                let this = unsafe { self.get_unchecked_mut() };
+                this.state = EventPollerState::Pushed;
+                return Poll::Pending;
+            }
+            return self.on_pushed(cx);
+        }
+        Poll::Pending
+    }
+
+    fn on_pushed(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if (self.should_wake)() {
+            return Poll::Ready(());
+        }
+
+        let Some(poller) = &mut self.token else {
+            unreachable!()
+        };
+        if !poller.revoke() && (self.should_wake)() {
+            // our token has already been popped meaning we are about to be woken anyway
+            return Poll::Ready(());
+        }
+
+        self.state = EventPollerState::Initial;
+        self.on_initial(cx)
+    }
+}
+
+impl<S, W> Future for Poller<'_, S, W>
+where
+    S: Fn(usize) -> bool + Send + Sync,
     W: Fn() -> bool + Send,
 {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = unsafe { self.get_unchecked_mut() };
-        if this.token_on_queue {
-            this.token_on_queue = false;
-            if (this.should_wake)() {
-                return Poll::Ready(());
-            }
-            if !this.list_token.revoke() && (this.should_wake)() {
-                // our token has already been popped meaning we are about to be woken anyway. Since shoudl wake is true we can just return ready
-                return Poll::Ready(());
-            }
-        }
-        this.list_token.inner().replace_waker(cx.waker().clone());
-
-        let pinned_token = unsafe { Pin::new_unchecked(&this.list_token) };
-        let did_push = pinned_token.push_if(&this.will_sleep);
-        if did_push {
-            this.token_on_queue = true;
-            Poll::Pending
-        } else {
-            Poll::Ready(())
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match &mut self.state {
+            EventPollerState::Initial => self.on_initial(cx),
+            EventPollerState::Pushing => self.on_pushing(cx),
+            EventPollerState::Pushed => self.on_pushed(cx),
         }
     }
 }

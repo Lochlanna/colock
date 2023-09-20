@@ -11,9 +11,11 @@ use core::cell::Cell;
 use core::fmt::{Debug, Formatter};
 use core::pin::Pin;
 use maybe_ref::MaybeRef;
+use std::ops::{Deref, DerefMut};
+use std::task::{Context, Poll};
 
 // Alias MiniLock to allow for testing with other lock implementations
-use mini_lock::MiniLock as InnerLock;
+use mini_lock::{MiniLock as InnerLock, MiniLockGuard, MiniLockPoller};
 
 /// Outer container for intrusive linked list. Proxies calls to the inner list
 /// through the inner lock
@@ -99,7 +101,7 @@ where
     }
 }
 
-struct IntrusiveLinkedListInner<T> {
+pub struct IntrusiveLinkedListInner<T> {
     head: *const Node<T>,
     tail: *const Node<T>,
     length: usize,
@@ -327,7 +329,7 @@ impl<T> Drop for ListToken<'_, T> {
     }
 }
 
-impl<T> ListToken<'_, T> {
+impl<'a, T> ListToken<'a, T> {
     /// Push the node onto the front of the queue.
     pub fn push(self: Pin<&Self>) {
         self.push_if(|_| true);
@@ -338,6 +340,19 @@ impl<T> ListToken<'_, T> {
         self.is_on_queue.set(true);
         let mut queue = self.queue.inner.lock();
         self.node.push_if(&mut queue, condition)
+    }
+
+    pub const fn push_if_async<C: FnOnce(usize) -> bool>(
+        self,
+        pre_push: fn(&ListToken<'_, T>, &Context<'_>),
+        condition: C,
+    ) -> AsyncListToken<'a, T, C> {
+        AsyncListToken {
+            token: self,
+            condition: Some(condition),
+            pre_push,
+            state: TokenPushPollerState::Initial,
+        }
     }
 
     /// Revoke the node from the queue.
@@ -360,6 +375,77 @@ impl<T> ListToken<'_, T> {
     /// If the node isn't actually off the queue this can result in a use after free
     pub unsafe fn set_off_queue(&self) {
         self.is_on_queue.set(false);
+    }
+}
+
+enum TokenPushPollerState<'a, T> {
+    Initial,
+    Locking(MiniLockPoller<'a, IntrusiveLinkedListInner<T>>),
+}
+
+pub struct AsyncListToken<'a, T, C>
+where
+    C: FnOnce(usize) -> bool,
+{
+    token: ListToken<'a, T>,
+    condition: Option<C>,
+    pre_push: fn(&ListToken<'_, T>, &Context<'_>),
+    state: TokenPushPollerState<'a, T>,
+}
+
+impl<'a, T, C> Deref for AsyncListToken<'a, T, C>
+where
+    C: FnOnce(usize) -> bool,
+{
+    type Target = ListToken<'a, T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.token
+    }
+}
+
+impl<T, C> Unpin for AsyncListToken<'_, T, C> where C: FnOnce(usize) -> bool {}
+
+impl<T, C> core::future::Future for AsyncListToken<'_, T, C>
+where
+    C: FnOnce(usize) -> bool,
+{
+    type Output = bool;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match &mut self.state {
+            TokenPushPollerState::Initial => {
+                let lock_poller = self.token.queue.inner.lock_async();
+                self.state = TokenPushPollerState::Locking(lock_poller);
+                let TokenPushPollerState::Locking(poller) = &mut self.state else {
+                    unreachable!()
+                };
+                let pinned_poller = unsafe { Pin::new_unchecked(poller) };
+                pinned_poller
+                    .poll(cx)
+                    .map(|mut guard| self.on_locked(&mut *guard, cx))
+            }
+            TokenPushPollerState::Locking(lock_poller) => {
+                let pinned_poller = unsafe { Pin::new_unchecked(lock_poller) };
+                if let Poll::Ready(mut guard) = pinned_poller.poll(cx) {
+                    return Poll::Ready(self.on_locked(&mut *guard, cx));
+                }
+                panic!("polling lock should never return pending");
+            }
+        }
+    }
+}
+
+impl<T, C> AsyncListToken<'_, T, C>
+where
+    C: FnOnce(usize) -> bool,
+{
+    fn on_locked(&mut self, queue: &mut IntrusiveLinkedListInner<T>, cx: &mut Context<'_>) -> bool {
+        self.token.is_on_queue.set(true);
+        (self.pre_push)(&self.token, cx);
+        self.token
+            .node
+            .push_if(queue, self.condition.take().unwrap())
     }
 }
 
