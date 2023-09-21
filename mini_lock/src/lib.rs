@@ -17,7 +17,8 @@ mod spinwait;
 
 use parking::{ThreadParker, ThreadParkerT};
 use spinwait::SpinWait;
-use std::cell::{Cell, UnsafeCell};
+use std::cell::UnsafeCell;
+use std::fmt::Debug;
 use std::ops::{Deref, DerefMut};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
@@ -47,11 +48,20 @@ impl Node {
 /// A small, light weight, unfair, FILO mutex that does not use any other locks including spin
 /// locks. It makes use of thread parking and thread yielding along with a FILO queue to provide
 /// a self contained priority inversion safe mutex.
+#[derive(Default)]
 pub struct MiniLock<T> {
     /// The data that is protected by the mutex
     data: UnsafeCell<T>,
     /// A tagged pointer representing the head of the queue and the lock state
     head: AtomicUsize,
+}
+
+impl<T> Debug for MiniLock<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MiniLock")
+            .field("is_locked", &self.is_locked())
+            .finish()
+    }
 }
 
 // SAFETY: MiniLock provides the synchronization needed to access the data

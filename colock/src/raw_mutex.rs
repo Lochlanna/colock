@@ -72,12 +72,17 @@ impl RawMutex {
         |_| {
             let mut state = self.state.load(Ordering::Relaxed);
             loop {
+                const FAIR_LOCKED: u8 = LOCKED_BIT | FAIR_BIT;
                 let (target, ordering) = match state {
                     0 => (LOCKED_BIT, Ordering::Acquire),
                     LOCKED_BIT => (LOCKED_BIT | WAIT_BIT, Ordering::Relaxed),
                     WAIT_BIT => (LOCKED_BIT | WAIT_BIT, Ordering::Acquire),
+                    FAIR_LOCKED => (FAIR_BIT | LOCKED_BIT | WAIT_BIT, Ordering::Relaxed),
                     _ => {
                         // locked and waiting / fair unlock
+                        debug_assert!(
+                            state == (LOCKED_BIT | WAIT_BIT) || state == (FAIR_LOCKED | WAIT_BIT)
+                        );
                         return true;
                     }
                 };
@@ -105,7 +110,7 @@ impl RawMutex {
             if state & FAIR_BIT == FAIR_BIT {
                 // we are fair unlocking
                 let old = self.state.fetch_and(!FAIR_BIT, Ordering::Relaxed);
-                debug_assert_eq!(old, LOCKED_BIT | FAIR_BIT);
+                debug_assert_eq!(old & !WAIT_BIT, LOCKED_BIT | FAIR_BIT);
                 return true;
             }
             self.try_lock_spin(&mut state)
@@ -118,7 +123,7 @@ impl RawMutex {
             if state & FAIR_BIT == FAIR_BIT {
                 // we are fair unlocking
                 let old = self.state.fetch_and(!FAIR_BIT, Ordering::Relaxed);
-                debug_assert_eq!(old, LOCKED_BIT | FAIR_BIT);
+                debug_assert_eq!(old & !WAIT_BIT, LOCKED_BIT | FAIR_BIT);
                 return true;
             }
             self.try_lock_once(&mut state)
@@ -230,7 +235,9 @@ unsafe impl lock_api::RawMutexFair for RawMutex {
         if self.state.load(Ordering::Acquire) & WAIT_BIT == 0 {
             return;
         }
-        if self.queue.notify_if(self.fair_conditional_notify(), || {}) {
+        if self.queue.notify_if(self.fair_conditional_notify(), || {
+            self.state.store(LOCKED_BIT, Ordering::Release);
+        }) {
             self.lock();
         }
     }
@@ -241,10 +248,11 @@ unsafe impl lock_api::RawMutexTimed for RawMutex {
     type Instant = Instant;
 
     fn try_lock_for(&self, timeout: Self::Duration) -> bool {
-        let timeout = Instant::now()
-            .checked_add(timeout)
-            .expect("overflow determining timeout");
-        self.try_lock_until(timeout)
+        if let Some(timeout) = Instant::now().checked_add(timeout) {
+            return self.try_lock_until(timeout);
+        }
+        self.lock();
+        true
     }
 
     fn try_lock_until(&self, timeout: Self::Instant) -> bool {

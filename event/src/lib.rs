@@ -87,6 +87,12 @@ pub struct Event {
     inner: IntrusiveLinkedList<Handle>,
 }
 
+impl Default for Event {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Event {
     #[must_use]
     pub const fn new() -> Self {

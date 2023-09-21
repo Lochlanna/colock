@@ -1,5 +1,7 @@
 use event::Event;
+use lock_api::RawRwLock as RawRWLockApi;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 const SHARED_LOCK: usize = 0b1;
 const EXCLUSIVE_LOCK: usize = 0b10;
@@ -12,13 +14,14 @@ const fn num_readers(state: usize) -> usize {
     (state & READERS_MASK) >> 4
 }
 
-pub struct RawRWLock {
+#[derive(Debug, Default)]
+pub struct RawRwLock {
     state: AtomicUsize,
     read_queue: Event,
     write_queue: Event,
 }
 
-impl RawRWLock {
+impl RawRwLock {
     pub const fn new() -> Self {
         Self {
             state: AtomicUsize::new(0),
@@ -192,9 +195,52 @@ impl RawRWLock {
                 });
         }
     }
+
+    pub async fn lock_shared_async(&self) {
+        let Err(mut state) = self.state.compare_exchange_weak(
+            0,
+            SHARED_LOCK | ONE_READER,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ) else {
+            return;
+        };
+        // if it's not write locked and there are no writers waiting we are allowed to grab the shared lock
+        if self.lock_shared_once(&mut state) {
+            return;
+        }
+        self.read_queue
+            .wait_while_async(
+                self.conditional_register_shared(),
+                self.should_wake_shared(),
+            )
+            .await;
+    }
+
+    pub async fn lock_exclusive_async(&self) {
+        let Err(mut state) = self.state.compare_exchange_weak(
+            0,
+            EXCLUSIVE_LOCK,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ) else {
+            return;
+        };
+        // if it's not write locked and there are no writers waiting we are allowed to grab the shared lock
+        if self.lock_exclusive_once(&mut state) {
+            return;
+        }
+        // we failed to grab the lock, so we need to wait
+        self.write_queue
+            .wait_while_async(
+                self.conditional_register_exclusive(),
+                self.should_wake_exclusive(),
+            )
+            .await;
+    }
 }
 
-unsafe impl lock_api::RawRwLock for RawRWLock {
+unsafe impl lock_api::RawRwLock for RawRwLock {
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self::new();
     type GuardMarker = ();
@@ -303,6 +349,69 @@ unsafe impl lock_api::RawRwLock for RawRWLock {
     }
 }
 
+unsafe impl lock_api::RawRwLockTimed for RawRwLock {
+    type Duration = std::time::Duration;
+    type Instant = std::time::Instant;
+
+    fn try_lock_shared_for(&self, timeout: Self::Duration) -> bool {
+        if let Some(timeout) = Instant::now().checked_add(timeout) {
+            return self.try_lock_shared_until(timeout);
+        }
+        self.lock_shared();
+        true
+    }
+
+    fn try_lock_shared_until(&self, timeout: Self::Instant) -> bool {
+        let Err(mut state) = self.state.compare_exchange_weak(
+            0,
+            SHARED_LOCK | ONE_READER,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ) else {
+            return true;
+        };
+        // if it's not write locked and there are no writers waiting we are allowed to grab the shared lock
+        if self.lock_shared_once(&mut state) {
+            return true;
+        }
+        // we failed to grab the lock, so we need to wait
+        self.read_queue.wait_while_until(
+            self.conditional_register_shared(),
+            self.should_wake_shared(),
+            timeout,
+        )
+    }
+
+    fn try_lock_exclusive_for(&self, timeout: Self::Duration) -> bool {
+        if let Some(timeout) = Instant::now().checked_add(timeout) {
+            return self.try_lock_exclusive_until(timeout);
+        }
+        self.lock_exclusive();
+        true
+    }
+
+    fn try_lock_exclusive_until(&self, timeout: Self::Instant) -> bool {
+        let Err(mut state) = self.state.compare_exchange_weak(
+            0,
+            EXCLUSIVE_LOCK,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ) else {
+            return true;
+        };
+        // if it's not write locked and there are no writers waiting we are allowed to grab the shared lock
+        if self.lock_exclusive_once(&mut state) {
+            return true;
+        }
+        // we failed to grab the lock, so we need to wait
+        self.write_queue.wait_while_until(
+            self.conditional_register_exclusive(),
+            self.should_wake_exclusive(),
+            timeout,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,7 +422,7 @@ mod tests {
 
     #[test]
     fn shared() {
-        let lock = RawRWLock::new();
+        let lock = RawRwLock::new();
         lock.lock_shared();
         lock.lock_shared();
         lock.lock_shared();
@@ -341,7 +450,7 @@ mod tests {
 
     #[test]
     fn try_exclusive_fails() {
-        let lock = RawRWLock::new();
+        let lock = RawRwLock::new();
         assert!(lock.try_lock_shared());
         assert!(!lock.try_lock_exclusive());
         let state = lock.state.load(Ordering::Relaxed);
@@ -351,7 +460,7 @@ mod tests {
     #[test]
     fn readers_wait() {
         let value = Arc::new(AtomicU8::new(0));
-        let lock = Arc::new(RawRWLock::new());
+        let lock = Arc::new(RawRwLock::new());
         let barrier = Arc::new(std::sync::Barrier::new(4));
 
         let handles = (0..3)

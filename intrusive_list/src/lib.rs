@@ -17,6 +17,7 @@ use mini_lock::MiniLock as InnerLock;
 
 /// Outer container for intrusive linked list. Proxies calls to the inner list
 /// through the inner lock
+#[derive(Default)]
 pub struct IntrusiveLinkedList<T> {
     inner: InnerLock<IntrusiveLinkedListInner<T>>,
 }
@@ -106,6 +107,12 @@ struct IntrusiveLinkedListInner<T> {
 }
 
 unsafe impl<T> Send for IntrusiveLinkedListInner<T> {}
+
+impl<T> Default for IntrusiveLinkedListInner<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl<T> IntrusiveLinkedListInner<T> {
     const fn new() -> Self {
