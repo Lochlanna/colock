@@ -1,129 +1,77 @@
 use crate::raw_mutex::RawMutex;
-use core::cell::UnsafeCell;
-use core::ops::{Deref, DerefMut};
-use lock_api::{RawMutex as RawMutexAPI, RawMutexTimed};
-use std::time::{Duration, Instant};
+use lock_api;
+use std::fmt::{Debug, Formatter};
+use std::ops::{Deref, DerefMut};
 
-pub struct Mutex<T: ?Sized> {
-    raw: RawMutex,
-    data: UnsafeCell<T>,
+#[derive(Default)]
+pub struct Mutex<T>(lock_api::Mutex<RawMutex, T>)
+where
+    T: ?Sized;
+
+impl<T> Debug for Mutex<T>
+where
+    T: Debug,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
-/// Safety: `Mutex` provides Sync over T through [`RawMutex`].
-unsafe impl<T> Sync for Mutex<T> where T: ?Sized {}
+impl<T> Deref for Mutex<T>
+where
+    T: ?Sized,
+{
+    type Target = lock_api::Mutex<RawMutex, T>;
 
-/// Safety: `Mutex` is `Send` if `T` is `Send`.
-unsafe impl<T> Send for Mutex<T> where T: ?Sized + Send {}
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> DerefMut for Mutex<T>
+where
+    T: ?Sized,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 impl<T> Mutex<T> {
-    pub const fn new(data: T) -> Self {
-        Self {
-            raw: RawMutex::new(),
-            data: UnsafeCell::new(data),
-        }
+    pub const fn new(val: T) -> Self {
+        Self(lock_api::Mutex::<RawMutex, T>::const_new(
+            RawMutex::new(),
+            val,
+        ))
+    }
+    pub const fn const_new(val: T) -> Self {
+        Self::new(val)
     }
 
+    // Consumes this mutex, returning the underlying data.
     #[inline]
-    pub fn is_locked(&self) -> bool {
-        self.raw.is_locked()
-    }
-
-    pub fn get_mut(&mut self) -> &mut T {
-        // Safety: We have exclusive access to the mutex because we have a mutable reference to it.
-        unsafe { &mut *self.data.get() }
-    }
-
     pub fn into_inner(self) -> T {
-        self.data.into_inner()
+        self.0.into_inner()
     }
 }
+
 impl<T> Mutex<T>
 where
     T: ?Sized,
 {
     #[inline]
-    pub fn lock(&self) -> MutexGuard<'_, T> {
-        self.raw.lock();
-        MutexGuard { mutex: self }
-    }
-
-    pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
-        if self.raw.try_lock() {
-            return Some(MutexGuard { mutex: self });
-        }
-        None
-    }
-
-    pub fn try_lock_until(&self, timeout: Instant) -> Option<MutexGuard<'_, T>> {
-        if self.raw.try_lock_until(timeout) {
-            return Some(MutexGuard { mutex: self });
-        }
-        None
-    }
-
-    pub fn try_lock_for(&self, timeout: Duration) -> Option<MutexGuard<'_, T>> {
-        if self.raw.try_lock_for(timeout) {
-            return Some(MutexGuard { mutex: self });
-        }
-        None
-    }
-
-    #[inline]
     pub async fn lock_async(&self) -> MutexGuard<'_, T> {
-        if !self.raw.try_lock() {
-            self.raw.lock_async().await;
+        if let Some(guard) = self.try_lock() {
+            return guard;
         }
-        MutexGuard { mutex: self }
-    }
-}
-
-pub struct MutexGuard<'a, T: ?Sized> {
-    mutex: &'a Mutex<T>,
-}
-
-unsafe impl<T> Send for MutexGuard<'_, T> {}
-
-impl<T> Drop for MutexGuard<'_, T>
-where
-    T: ?Sized,
-{
-    fn drop(&mut self) {
         unsafe {
-            self.mutex.raw.unlock();
+            self.raw().lock_async().await;
+            self.guard()
         }
     }
 }
 
-impl<T> Deref for MutexGuard<'_, T>
-where
-    T: ?Sized,
-{
-    type Target = T;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*self.mutex.data.get() }
-    }
-}
-
-impl<T> DerefMut for MutexGuard<'_, T>
-where
-    T: ?Sized,
-{
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.mutex.data.get() }
-    }
-}
-
-impl<T> MutexGuard<'_, T>
-where
-    T: ?Sized,
-{
-    pub(crate) fn get_raw_mutex(&self) -> &RawMutex {
-        &self.mutex.raw
-    }
-}
+pub type MutexGuard<'a, T> = lock_api::MutexGuard<'a, RawMutex, T>;
 
 #[cfg(test)]
 mod tests {
@@ -136,6 +84,19 @@ mod tests {
     #[derive(Eq, PartialEq, Debug)]
     struct NonCopy(i32);
 
+    trait Raw {
+        type RAW;
+
+        fn raw(&self) -> &Self::RAW;
+    }
+    impl<T> Raw for Mutex<T> {
+        type RAW = RawMutex;
+
+        fn raw(&self) -> &Self::RAW {
+            unsafe { self.0.raw() }
+        }
+    }
+
     #[test]
     fn it_works_threaded() {
         let mutex = Mutex::new(());
@@ -146,7 +107,7 @@ mod tests {
                 for _ in 0..num_iterations {
                     let guard = mutex.lock();
                     barrier.wait();
-                    while mutex.raw.queue().num_waiting() == 0 {
+                    while mutex.raw().queue().num_waiting() == 0 {
                         thread::yield_now();
                     }
                     thread::sleep(Duration::from_millis(5));
@@ -176,7 +137,7 @@ mod tests {
                 for _ in 0..num_iterations {
                     let guard = mutex.lock_async().await;
                     barrier.wait().await;
-                    while mutex.raw.queue().num_waiting() == 0 {
+                    while mutex.raw().queue().num_waiting() == 0 {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
                     tokio::time::sleep(Duration::from_millis(5)).await;
@@ -327,5 +288,11 @@ mod tests {
         .join();
         let lock = arc.lock();
         assert_eq!(*lock, 2);
+    }
+
+    #[test]
+    fn debug() {
+        let mutex = Mutex::new(32);
+        println!("{:?}", mutex);
     }
 }
