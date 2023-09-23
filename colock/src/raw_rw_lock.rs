@@ -179,10 +179,9 @@ impl RawRwLock {
         }
     }
 
-    fn wake(&self, state: usize) {
+    fn handle_wake(&self, state: usize) {
         if state & EXCLUSIVE_WAITING != 0 {
             // there is a writer waiting so we will wake them
-            // we were the last reader, so we need to wake up a writer
             self.write_queue
                 .notify_if(self.conditional_notify_exclusive(), || {
                     self.state.fetch_and(!EXCLUSIVE_WAITING, Ordering::Relaxed);
@@ -299,7 +298,7 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
             }
             if num_readers(state) == 1 {
                 // we were the last one (and unlocked the lock) so we should try to wake up waiting threads
-                self.wake(target);
+                self.handle_wake(target);
             }
             return;
         }
@@ -345,7 +344,7 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
 
     unsafe fn unlock_exclusive(&self) {
         let old_state = self.state.fetch_and(!EXCLUSIVE_LOCK, Ordering::Release);
-        self.wake(old_state);
+        self.handle_wake(old_state);
     }
 }
 
