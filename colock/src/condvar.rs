@@ -2,6 +2,8 @@ use crate::mutex::MutexGuard;
 use crate::raw_mutex::RawMutex;
 use event::Event;
 use lock_api::RawMutex as LockApiRawMutex;
+use std::cell::Cell;
+use std::ops::Deref;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
@@ -16,6 +18,24 @@ impl WaitTimeoutResult {
     #[inline]
     pub fn timed_out(self) -> bool {
         self.0
+    }
+}
+
+#[derive(Debug, Default)]
+struct UnlockFlag(Cell<bool>);
+
+unsafe impl Sync for UnlockFlag {}
+
+impl Deref for UnlockFlag {
+    type Target = Cell<bool>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl UnlockFlag {
+    const fn new() -> Self {
+        Self(Cell::new(false))
     }
 }
 
@@ -76,7 +96,11 @@ impl Condvar {
         )
     }
 
-    const fn will_sleep<'a>(&'a self, mutex: &'a RawMutex) -> impl Fn(usize) -> bool + 'a {
+    const fn will_sleep<'a>(
+        &'a self,
+        mutex: &'a RawMutex,
+        did_unlock: &'a UnlockFlag,
+    ) -> impl Fn(usize) -> bool + 'a {
         move |_| {
             let current_mutex = self
                 .current_mutex
@@ -90,6 +114,7 @@ impl Condvar {
             unsafe {
                 mutex.unlock();
             }
+            did_unlock.set(true);
             true
         }
     }
@@ -97,8 +122,12 @@ impl Condvar {
     pub fn wait<T: ?Sized>(&self, guard: &mut MutexGuard<'_, T>) {
         let mutex = unsafe { MutexGuard::mutex(guard).raw() };
         debug_assert!(mutex.is_locked());
-        self.wait_queue.wait_once(self.will_sleep(mutex));
-        mutex.lock();
+        let did_unlock = UnlockFlag::new();
+        self.wait_queue
+            .wait_once(self.will_sleep(mutex, &did_unlock));
+        if did_unlock.get() {
+            mutex.lock();
+        }
     }
 
     pub fn wait_until<T: ?Sized>(
@@ -108,10 +137,15 @@ impl Condvar {
     ) -> WaitTimeoutResult {
         let mutex = unsafe { MutexGuard::mutex(guard).raw() };
         debug_assert!(mutex.is_locked());
-        let result = !self
-            .wait_queue
-            .wait_while_until(self.will_sleep(mutex), || true, timeout);
-        mutex.lock();
+        let did_unlock = UnlockFlag::new();
+        let result = !self.wait_queue.wait_while_until(
+            self.will_sleep(mutex, &did_unlock),
+            || true,
+            timeout,
+        );
+        if did_unlock.get() {
+            mutex.lock();
+        }
         WaitTimeoutResult(result)
     }
 
@@ -135,8 +169,12 @@ impl Condvar {
         let mutex = unsafe { MutexGuard::mutex(guard).raw() };
         while condition(&mut *guard) {
             debug_assert!(mutex.is_locked());
-            self.wait_queue.wait_once(self.will_sleep(mutex));
-            mutex.lock();
+            let did_unlock = UnlockFlag::new();
+            self.wait_queue
+                .wait_once(self.will_sleep(mutex, &did_unlock));
+            if did_unlock.get() {
+                mutex.lock();
+            }
         }
     }
 
@@ -149,11 +187,15 @@ impl Condvar {
         let mutex = unsafe { MutexGuard::mutex(guard).raw() };
         while condition(&mut *guard) {
             debug_assert!(mutex.is_locked());
-            let result =
-                !self
-                    .wait_queue
-                    .wait_while_until(self.will_sleep(mutex), || true, timeout);
-            mutex.lock();
+            let did_unlock = UnlockFlag::new();
+            let result = !self.wait_queue.wait_while_until(
+                self.will_sleep(mutex, &did_unlock),
+                || true,
+                timeout,
+            );
+            if did_unlock.get() {
+                mutex.lock();
+            }
             if result {
                 return WaitTimeoutResult(true);
             }
@@ -174,10 +216,13 @@ impl Condvar {
     pub async fn async_wait<T: ?Sized>(&self, guard: &mut MutexGuard<'_, T>) {
         let mutex = unsafe { MutexGuard::mutex(guard).raw() };
         debug_assert!(mutex.is_locked());
+        let did_unlock = UnlockFlag::new();
         self.wait_queue
-            .wait_while_async(self.will_sleep(mutex), || true)
+            .wait_while_async(self.will_sleep(mutex, &did_unlock), || true)
             .await;
-        mutex.lock_async().await;
+        if did_unlock.get() {
+            mutex.lock_async().await;
+        }
     }
 }
 
@@ -351,8 +396,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)]
-    //TODO miri doesn't like this. Is there a bug or is it just miri?
     fn wait_for() {
         let m = Arc::new(Mutex::new(()));
         let m2 = m.clone();
@@ -374,8 +417,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)]
-    //TODO miri doesn't like this. Is there a bug or is it just miri?
     fn wait_until() {
         let m = Arc::new(Mutex::new(()));
         let m2 = m.clone();
@@ -452,8 +493,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)]
-    //TODO miri doesn't like this. Is there a bug or is it just miri?
     fn wait_while_until_internal_times_out_before_false() {
         let mutex = Arc::new(Mutex::new(0));
         let cv = Arc::new(Condvar::new());
@@ -535,8 +574,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)]
-    //TODO this fails under miri should it..?
     fn two_mutexes_disjoint() {
         let m = Arc::new(Mutex::new(()));
         let m2 = m.clone();

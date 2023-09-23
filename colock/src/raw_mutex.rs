@@ -358,7 +358,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)]
     fn lock_timeout() {
         let mutex = RawMutex::new();
         mutex.lock();

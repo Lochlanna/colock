@@ -121,9 +121,7 @@ mod tests {
             // The same messages will be printed together.
             // You will NOT see any interleaving.
             handles.push(thread::spawn(move || {
-                println!("before wait");
                 c.wait();
-                println!("after wait");
             }));
         }
         // Wait for other threads to finish.
