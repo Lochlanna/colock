@@ -5,12 +5,9 @@
 #![allow(clippy::module_name_repetitions)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 
-pub mod maybe_ref;
-
 use core::cell::Cell;
 use core::fmt::{Debug, Formatter};
 use core::pin::Pin;
-use maybe_ref::MaybeRef;
 
 // Alias MiniLock to allow for testing with other lock implementations
 use mini_lock::MiniLock as InnerLock;
@@ -45,7 +42,7 @@ impl<T> IntrusiveLinkedList<T> {
 
 impl<T> IntrusiveLinkedList<T>
 where
-    T: Node<T>,
+    T: HasNode<T>,
 {
     /// Pops the tail from the list if the condition is true
     ///
@@ -71,7 +68,7 @@ where
     }
 
     /// Build a token that references this list
-    pub const fn build_token<'a>(&'a self, node: MaybeRef<'a, T>) -> ListToken<'a, T>
+    pub const fn build_token<'a>(&'a self, node: T) -> ListToken<'a, T>
     where
         T: 'a,
     {
@@ -92,7 +89,7 @@ where
     }
 }
 
-pub struct IntrusiveLinkedListInner<T> {
+struct IntrusiveLinkedListInner<T> {
     head: *const T,
     tail: *const T,
     length: usize,
@@ -191,7 +188,7 @@ pub trait HasNode<S> {
     fn get_node(&self) -> &NodeData<S>;
 }
 
-pub trait Node<S>: HasNode<S> {
+trait Node<S>: HasNode<S> {
     fn push(&self, queue: &mut IntrusiveLinkedListInner<S>);
     fn push_if(
         &self,
@@ -315,11 +312,11 @@ where
 #[derive(Debug)]
 pub struct ListToken<'a, T>
 where
-    T: Node<T>,
+    T: HasNode<T>,
 {
     is_on_queue: Cell<bool>,
     queue: &'a IntrusiveLinkedList<T>,
-    node: MaybeRef<'a, T>,
+    node: T,
     _unpin: core::marker::PhantomPinned,
 }
 
@@ -560,11 +557,11 @@ mod tests {
     #[test]
     fn drop_test() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = pin!(queue.build_token(Box::new(TestNode::new(32)).into()));
+        let node_a = pin!(queue.build_token(TestNode::new(32)));
         node_a.as_ref().push();
-        let node_c = pin!(queue.build_token(Box::new(TestNode::new(21)).into()));
+        let node_c = pin!(queue.build_token(TestNode::new(21)));
         {
-            let node_b = pin!(queue.build_token(Box::new(TestNode::new(42)).into()));
+            let node_b = pin!(queue.build_token(TestNode::new(42)));
             node_b.as_ref().push();
             node_c.as_ref().push();
 

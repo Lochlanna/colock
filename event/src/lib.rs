@@ -6,13 +6,14 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 mod handle;
+mod maybe_ref;
 
 use core::cell::Cell;
 use core::pin::{pin, Pin};
 use core::task::{Context, Poll};
 use handle::{AsyncHandle, Handle, ThreadHandle, Wakeable};
-use intrusive_list::maybe_ref::MaybeRef;
 use intrusive_list::{HasNode, IntrusiveLinkedList, ListToken, NodeData};
+use maybe_ref::MaybeRef;
 use parking::{ThreadParker, ThreadParkerT};
 use std::fmt::Debug;
 use std::time::Instant;
@@ -124,7 +125,7 @@ impl<T> TaggedEvent<T> {
             event: self,
             will_sleep,
             should_wake,
-            list_token: self.queue.build_token(MaybeRef::Owned(node)),
+            list_token: self.queue.build_token(node),
             token_on_queue: false,
         }
     }
@@ -144,7 +145,7 @@ impl<T> TaggedEvent<T> {
                 handle: MaybeRef::Owned(Handle::Sync(ThreadParker::const_new())),
                 metadata,
             };
-            let token = pin!(self.queue.build_token(node.into()));
+            let token = pin!(self.queue.build_token(node));
             return f(&token);
         }
 
@@ -158,7 +159,7 @@ impl<T> TaggedEvent<T> {
                 handle: MaybeRef::Ref(handle),
                 metadata,
             };
-            let token = pin!(self.queue.build_token(node.into()));
+            let token = pin!(self.queue.build_token(node));
             f(&token)
         })
     }

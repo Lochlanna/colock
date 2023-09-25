@@ -235,9 +235,13 @@ unsafe impl lock_api::RawMutexFair for RawMutex {
         if self.state.load(Ordering::Acquire) & WAIT_BIT == 0 {
             return;
         }
-        if self.queue.notify_if(self.fair_conditional_notify(), || {
+        let on_empty = || {
             self.state.store(LOCKED_BIT, Ordering::Release);
-        }) {
+        };
+        if self
+            .queue
+            .notify_if(self.fair_conditional_notify(), on_empty)
+        {
             self.lock();
         }
     }

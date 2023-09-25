@@ -293,6 +293,6 @@ mod tests {
     #[test]
     fn debug() {
         let mutex = Mutex::new(32);
-        println!("{:?}", mutex);
+        println!("{mutex:?}",);
     }
 }
