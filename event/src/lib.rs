@@ -49,12 +49,12 @@ impl<T> TaggedEvent<T> {
         }
     }
     fn notify_one(&self) -> bool {
-        self.notify_if(|_| true, || {})
+        self.notify_if(|_, _| true, || {})
     }
 
     pub fn notify_all_while(
         &self,
-        condition: impl Fn(usize) -> bool,
+        condition: impl Fn(usize, &T) -> bool,
         on_empty: impl Fn(),
     ) -> usize {
         self.notify_many_while(usize::MAX, condition, on_empty)
@@ -63,16 +63,16 @@ impl<T> TaggedEvent<T> {
     pub fn notify_many_while(
         &self,
         max: usize,
-        condition: impl Fn(usize) -> bool,
+        condition: impl Fn(usize, &T) -> bool,
         on_empty: impl Fn(),
     ) -> usize {
         if max == 0 {
             return 0;
         }
         let num_waiting = Cell::new(max);
-        let get_count = |num_in_queue| {
+        let get_count = |num_in_queue, metadata: &T| {
             num_waiting.set(num_waiting.get().min(num_in_queue));
-            condition(num_in_queue)
+            condition(num_in_queue, metadata)
         };
         if !self.notify_if(get_count, &on_empty) {
             return 0;
@@ -85,10 +85,10 @@ impl<T> TaggedEvent<T> {
 
         num_notified
     }
-    pub fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn()) -> bool {
+    pub fn notify_if(&self, condition: impl Fn(usize, &T) -> bool, on_empty: impl Fn()) -> bool {
         if let Some(unpark_handle) = self.queue.pop_if(
             |parker, num_left| {
-                if !condition(num_left) {
+                if !condition(num_left, &parker.metadata) {
                     return None;
                 }
                 Some(parker.handle.unpark_handle())
@@ -367,6 +367,7 @@ impl Event {
         condition: impl Fn(usize) -> bool,
         on_empty: impl Fn(),
     ) -> usize {
+        let condition = |num_waiting, _: &_| condition(num_waiting);
         self.inner.notify_all_while(condition, on_empty)
     }
 
@@ -376,10 +377,12 @@ impl Event {
         condition: impl Fn(usize) -> bool,
         on_empty: impl Fn(),
     ) -> usize {
+        let condition = |num_waiting, _: &_| condition(num_waiting);
         self.inner.notify_many_while(max, condition, on_empty)
     }
 
     pub fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn()) -> bool {
+        let condition = |num_waiting, _: &_| condition(num_waiting);
         self.inner.notify_if(condition, on_empty)
     }
 
