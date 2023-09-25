@@ -140,7 +140,7 @@ where
         unsafe {
             let tail = &*self.tail;
             debug_assert!(tail.get_node().is_on_queue.get());
-            let ret = condition(&tail, self.length);
+            let ret = condition(tail, self.length);
             ret.as_ref()?;
             tail.remove(self);
             debug_assert!(!tail.get_node().is_on_queue.get());
@@ -215,6 +215,7 @@ pub struct NodeData<S> {
 unsafe impl<T> Send for NodeData<T> where T: Send {}
 
 impl<T> NodeData<T> {
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             next: Cell::new(core::ptr::null()),
@@ -379,7 +380,7 @@ mod tests {
     use super::*;
     use itertools::Itertools;
     use std::collections::HashMap;
-    use std::ops::{Deref, Div};
+    use std::ops::Div;
     use std::pin::pin;
     use std::thread;
 
@@ -411,8 +412,8 @@ mod tests {
         }
     }
 
-    impl<T> HasNode<TestNode<T>> for TestNode<T> {
-        fn get_node(&self) -> &NodeData<TestNode<T>> {
+    impl<T> HasNode<Self> for TestNode<T> {
+        fn get_node(&self) -> &NodeData<Self> {
             &self.node_data
         }
     }

@@ -24,8 +24,8 @@ struct IntrusiveNode<T> {
     metadata: T,
 }
 
-impl<T> HasNode<IntrusiveNode<T>> for IntrusiveNode<T> {
-    fn get_node(&self) -> &NodeData<IntrusiveNode<T>> {
+impl<T> HasNode<Self> for IntrusiveNode<T> {
+    fn get_node(&self) -> &NodeData<Self> {
         &self.node_data
     }
 }
@@ -159,7 +159,7 @@ impl<T> TaggedEvent<T> {
                 metadata,
             };
             let token = pin!(self.queue.build_token(node.into()));
-            return f(&token);
+            f(&token)
         })
     }
 
@@ -292,6 +292,7 @@ unsafe impl<T, S, W> Send for Poller<'_, T, S, W>
 where
     S: Fn(usize) -> bool + Send,
     W: Fn() -> bool + Send,
+    T: Send,
 {
 }
 
@@ -400,11 +401,11 @@ impl Event {
     }
 
     pub fn wait_once(&self, will_sleep: impl Fn(usize) -> bool) {
-        self.inner.wait_once(will_sleep, ())
+        self.inner.wait_once(will_sleep, ());
     }
 
     pub fn wait_while(&self, should_sleep: impl Fn(usize) -> bool, should_wake: impl Fn() -> bool) {
-        self.inner.wait_while(should_sleep, should_wake, ())
+        self.inner.wait_while(should_sleep, should_wake, ());
     }
 
     pub fn wait_while_until(
