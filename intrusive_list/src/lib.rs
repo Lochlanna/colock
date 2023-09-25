@@ -24,7 +24,7 @@ pub struct IntrusiveLinkedList<T> {
 
 impl<T> Debug for IntrusiveLinkedList<T>
 where
-    T: Debug,
+    T: Debug + Node<T>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let guard = self.inner.lock();
@@ -41,7 +41,12 @@ impl<T> IntrusiveLinkedList<T> {
             inner: InnerLock::new(IntrusiveLinkedListInner::new()),
         }
     }
+}
 
+impl<T> IntrusiveLinkedList<T>
+where
+    T: Node<T>,
+{
     /// Pops the tail from the list if the condition is true
     ///
     /// This function proxies to the inner list via a spin lock making it safe to call from
@@ -60,12 +65,13 @@ impl<T> IntrusiveLinkedList<T> {
     /// Create a new node object.
     ///
     /// Node that this does not push the node onto the list.
-    pub const fn build_node(data: T) -> Node<T> {
-        Node::new(data)
+    #[must_use]
+    pub const fn new_node_data() -> NodeData<T> {
+        NodeData::new()
     }
 
     /// Build a token that references this list
-    pub const fn build_token<'a>(&'a self, node: MaybeRef<'a, Node<T>>) -> ListToken<'a, T>
+    pub const fn build_token<'a>(&'a self, node: MaybeRef<'a, T>) -> ListToken<'a, T>
     where
         T: 'a,
     {
@@ -86,23 +92,9 @@ impl<T> IntrusiveLinkedList<T> {
     }
 }
 
-impl<T> IntrusiveLinkedList<T>
-where
-    T: Clone,
-{
-    pub fn clone_to_vec(&self) -> Vec<T> {
-        self.inner.lock().clone_to_vec()
-    }
-
-    /// helper function that pops the tail and clones it
-    fn pop_clone(&self) -> Option<T> {
-        self.inner.lock().pop_if(|v, _| Some(v.clone()), || {})
-    }
-}
-
-struct IntrusiveLinkedListInner<T> {
-    head: *const Node<T>,
-    tail: *const Node<T>,
+pub struct IntrusiveLinkedListInner<T> {
+    head: *const T,
+    tail: *const T,
     length: usize,
 }
 
@@ -122,7 +114,12 @@ impl<T> IntrusiveLinkedListInner<T> {
             length: 0,
         }
     }
+}
 
+impl<T> IntrusiveLinkedListInner<T>
+where
+    T: Node<T>,
+{
     /// Pops the tail from the list if the condition is true
     /// note that this function does return the value that was popped.
     /// It does however return a value from the condition check.
@@ -142,11 +139,11 @@ impl<T> IntrusiveLinkedListInner<T> {
         }
         unsafe {
             let tail = &*self.tail;
-            debug_assert!(tail.is_on_queue.get());
-            let ret = condition(&tail.data, self.length);
+            debug_assert!(tail.get_node().is_on_queue.get());
+            let ret = condition(&tail, self.length);
             ret.as_ref()?;
             tail.remove(self);
-            debug_assert!(!tail.is_on_queue.get());
+            debug_assert!(!tail.get_node().is_on_queue.get());
             ret
         }
     }
@@ -156,31 +153,10 @@ impl<T> IntrusiveLinkedListInner<T> {
     }
 }
 
-impl<T> IntrusiveLinkedListInner<T>
-where
-    T: Clone,
-{
-    /// helper function that clones the items from the list into a vector.
-    /// Items are cloned from the head first.
-    fn clone_to_vec(&self) -> Vec<T> {
-        let mut data = Vec::new();
-        if self.head.is_null() {
-            return data;
-        }
-        let mut current = self.head;
-        while !current.is_null() {
-            let current_ref = unsafe { &*current };
-            data.push(current_ref.data.clone());
-            current = current_ref.next.get();
-        }
-        data
-    }
-}
-
 #[allow(clippy::missing_fields_in_debug)]
 impl<T> Debug for IntrusiveLinkedListInner<T>
 where
-    T: Debug,
+    T: Debug + Node<T>,
 {
     /// An unconventional debug implementation but it's much more useful for debugging
     /// than simply printing the pointer values
@@ -194,7 +170,7 @@ where
         while !current.is_null() {
             // Safety: we've checked for current not null
             let current_ref = unsafe { &*current };
-            next_str.push_str(format!("\t↑ {:?}\n", current_ref.prev.get()).as_str());
+            next_str.push_str(format!("\t↑ {:?}\n", current_ref.get_node().prev.get()).as_str());
             output.push_str(
                 format!(
                     "{}{:?} → {:?},",
@@ -202,8 +178,8 @@ where
                 )
                 .as_str(),
             );
-            next_str = format!("\n\t↓ {:?}", current_ref.next.get());
-            current = current_ref.next.get();
+            next_str = format!("\n\t↓ {:?}", current_ref.get_node().next.get());
+            current = current_ref.get_node().next.get();
         }
         output += next_str.as_str();
         output.push_str("\n]");
@@ -211,55 +187,73 @@ where
     }
 }
 
+pub trait HasNode<S> {
+    fn get_node(&self) -> &NodeData<S>;
+}
+
+pub trait Node<S>: HasNode<S> {
+    fn push(&self, queue: &mut IntrusiveLinkedListInner<S>);
+    fn push_if(
+        &self,
+        queue: &mut IntrusiveLinkedListInner<S>,
+        condition: impl FnOnce(usize) -> bool,
+    ) -> bool;
+    fn revoke(&self, queue: &mut IntrusiveLinkedListInner<S>) -> bool;
+    fn remove(&self, queue: &mut IntrusiveLinkedListInner<S>);
+}
+
 /// An intrusive linked list node.
 /// This node should be embedded within another struct and pinned before it is pushed to the list
 /// If it moves while on the list it will invalidate the list!
 #[derive(Debug)]
-pub struct Node<T> {
-    next: Cell<*const Node<T>>,
-    prev: Cell<*const Node<T>>,
+pub struct NodeData<S> {
+    next: Cell<*const S>,
+    prev: Cell<*const S>,
     is_on_queue: Cell<bool>,
-    data: T,
 }
 
-unsafe impl<T> Send for Node<T> where T: Send {}
+unsafe impl<T> Send for NodeData<T> where T: Send {}
 
-impl<T> Node<T> {
-    pub const fn new(data: T) -> Self {
+impl<T> NodeData<T> {
+    pub const fn new() -> Self {
         Self {
             next: Cell::new(core::ptr::null()),
             prev: Cell::new(core::ptr::null()),
             is_on_queue: Cell::new(false),
-            data,
         }
     }
-
+}
+impl<S> Node<S> for S
+where
+    S: HasNode<S>,
+{
     /// helper method to unconditionally push the node to the front of the queue
-    fn push(&self, queue: &mut IntrusiveLinkedListInner<T>) {
+    fn push(&self, queue: &mut IntrusiveLinkedListInner<S>) {
         self.push_if(queue, |_| true);
     }
 
     fn push_if(
         &self,
-        queue: &mut IntrusiveLinkedListInner<T>,
+        queue: &mut IntrusiveLinkedListInner<S>,
         condition: impl FnOnce(usize) -> bool,
     ) -> bool {
+        let inner_node = self.get_node();
         if !condition(queue.length) {
-            debug_assert!(!self.is_on_queue.get());
+            debug_assert!(!inner_node.is_on_queue.get());
             return false;
         }
 
-        self.prev.set(core::ptr::null());
-        self.next.set(queue.head);
+        inner_node.prev.set(core::ptr::null());
+        inner_node.next.set(queue.head);
         if queue.head.is_null() {
             // This will be the only item in the list and is therefore also the tail
             queue.tail = self;
         } else {
             let head_ref = unsafe { &*queue.head };
-            head_ref.prev.set(self);
+            head_ref.get_node().prev.set(self);
         }
         queue.head = self;
-        self.is_on_queue.set(true);
+        inner_node.is_on_queue.set(true);
 
         queue.length += 1;
 
@@ -268,8 +262,8 @@ impl<T> Node<T> {
 
     /// If the node is on the queue it will be removed and true will be returned.
     /// If the node wasn't already on the queue false will be returned.
-    fn revoke(&self, queue: &mut IntrusiveLinkedListInner<T>) -> bool {
-        if !self.is_on_queue.replace(false) {
+    fn revoke(&self, queue: &mut IntrusiveLinkedListInner<S>) -> bool {
+        if !self.get_node().is_on_queue.replace(false) {
             return false;
         }
         self.remove(queue);
@@ -277,38 +271,39 @@ impl<T> Node<T> {
     }
 
     /// Removes the node from the queue.
-    fn remove(&self, queue: &mut IntrusiveLinkedListInner<T>) {
+    fn remove(&self, queue: &mut IntrusiveLinkedListInner<S>) {
+        let inner_node = self.get_node();
         queue.length -= 1;
 
-        if self.prev.get().is_null() {
+        if inner_node.prev.get().is_null() {
             // This is the head
-            let next = self.next.get();
+            let next = inner_node.next.get();
             if let Some(next) = unsafe { next.as_ref() } {
-                next.prev.set(core::ptr::null());
+                next.get_node().prev.set(core::ptr::null());
             } else {
                 // This is also the tail (only item in the list)
                 debug_assert_eq!(queue.tail, self as *const _);
                 queue.tail = core::ptr::null();
             }
             queue.head = next;
-        } else if self.next.get().is_null() {
+        } else if inner_node.next.get().is_null() {
             // This is the tail
             debug_assert_eq!(queue.tail, self as *const _);
-            let prev = unsafe { &*self.prev.get() };
-            prev.next.set(core::ptr::null());
+            let prev = unsafe { &*inner_node.prev.get() };
+            prev.get_node().next.set(core::ptr::null());
             queue.tail = prev;
         } else {
             // This is in the middle somewhere
-            let prev = unsafe { &*self.prev.get() };
-            let next = unsafe { &*self.next.get() };
-            next.prev.set(prev);
-            prev.next.set(next);
+            let prev = unsafe { &*inner_node.prev.get() };
+            let next = unsafe { &*inner_node.next.get() };
+            next.get_node().prev.set(prev);
+            prev.get_node().next.set(next);
         }
 
-        self.next.set(core::ptr::null());
-        self.prev.set(core::ptr::null());
+        inner_node.next.set(core::ptr::null());
+        inner_node.prev.set(core::ptr::null());
 
-        self.is_on_queue.set(false);
+        inner_node.is_on_queue.set(false);
     }
 }
 
@@ -317,14 +312,20 @@ impl<T> Node<T> {
 ///
 /// Once the token has been pushed to the list it cannot be moved again. Even if it's revoked.
 #[derive(Debug)]
-pub struct ListToken<'a, T> {
+pub struct ListToken<'a, T>
+where
+    T: Node<T>,
+{
     is_on_queue: Cell<bool>,
     queue: &'a IntrusiveLinkedList<T>,
-    node: MaybeRef<'a, Node<T>>,
+    node: MaybeRef<'a, T>,
     _unpin: core::marker::PhantomPinned,
 }
 
-impl<T> Drop for ListToken<'_, T> {
+impl<'a, T> Drop for ListToken<'a, T>
+where
+    T: Node<T>,
+{
     fn drop(&mut self) {
         // it's possible that the node isn't actually on the queue even if is_pushed is true
         // it's never possible that it's on the queue if is_pushed is false
@@ -334,7 +335,10 @@ impl<T> Drop for ListToken<'_, T> {
     }
 }
 
-impl<T> ListToken<'_, T> {
+impl<'a, T> ListToken<'a, T>
+where
+    T: Node<T>,
+{
     /// Push the node onto the front of the queue.
     pub fn push(self: Pin<&Self>) {
         self.push_if(|_| true);
@@ -359,7 +363,7 @@ impl<T> ListToken<'_, T> {
 
     /// Access the inner value of the node.
     pub fn inner(&self) -> &T {
-        &self.node.data
+        &self.node
     }
 
     /// # Safety
@@ -375,7 +379,7 @@ mod tests {
     use super::*;
     use itertools::Itertools;
     use std::collections::HashMap;
-    use std::ops::Div;
+    use std::ops::{Deref, Div};
     use std::pin::pin;
     use std::thread;
 
@@ -389,11 +393,70 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct TestNode<T> {
+        node_data: NodeData<Self>,
+        data: T,
+    }
+    impl<T> TestNode<T> {
+        const fn new(data: T) -> Self {
+            Self {
+                node_data: NodeData::new(),
+                data,
+            }
+        }
+
+        const fn inner(&self) -> &T {
+            &self.data
+        }
+    }
+
+    impl<T> HasNode<TestNode<T>> for TestNode<T> {
+        fn get_node(&self) -> &NodeData<TestNode<T>> {
+            &self.node_data
+        }
+    }
+
+    impl<T> IntrusiveLinkedListInner<TestNode<T>>
+    where
+        T: Clone,
+    {
+        /// helper function that clones the items from the list into a vector.
+        /// Items are cloned from the head first.
+        fn clone_to_vec(&self) -> Vec<T> {
+            let mut data = Vec::new();
+            if self.head.is_null() {
+                return data;
+            }
+            let mut current = self.head;
+            while !current.is_null() {
+                let current_ref = unsafe { &*current };
+                data.push(current_ref.data.clone());
+                current = current_ref.get_node().next.get();
+            }
+            data
+        }
+    }
+
+    impl<T> IntrusiveLinkedList<TestNode<T>>
+    where
+        T: Clone,
+    {
+        pub fn clone_to_vec(&self) -> Vec<T> {
+            self.inner.lock().clone_to_vec()
+        }
+
+        /// helper function that pops the tail and clones it
+        fn pop_clone(&self) -> Option<T> {
+            self.inner.lock().pop_if(|v, _| Some(v.data.clone()), || {})
+        }
+    }
+
     #[test]
     fn it_works() {
         let ill = IntrusiveLinkedList::new();
-        let node_a = Node::new(42);
-        let node_b = Node::new(32);
+        let node_a = TestNode::new(42);
+        let node_b = TestNode::new(32);
         {
             let mut ill_lock = ill.inner.lock();
             node_a.push(&mut ill_lock);
@@ -406,11 +469,11 @@ mod tests {
     #[test]
     fn basic_push() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = pin!(queue.build_token(Node::new(32).into()));
+        let node_a = pin!(queue.build_token(TestNode::new(32).into()));
         node_a.as_ref().push();
-        let node_b = pin!(queue.build_token(Node::new(42).into()));
+        let node_b = pin!(queue.build_token(TestNode::new(42).into()));
         node_b.as_ref().push();
-        let node_c = pin!(queue.build_token(Node::new(21).into()));
+        let node_c = pin!(queue.build_token(TestNode::new(21).into()));
         node_c.as_ref().push();
         let elements = queue.clone_to_vec();
         assert_eq!(elements, vec![21, 42, 32]);
@@ -420,11 +483,11 @@ mod tests {
     #[test]
     fn revoke_head() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = pin!(queue.build_token(Node::new(32).into()));
+        let node_a = pin!(queue.build_token(TestNode::new(32).into()));
         node_a.as_ref().push();
-        let node_b = pin!(queue.build_token(Node::new(42).into()));
+        let node_b = pin!(queue.build_token(TestNode::new(42).into()));
         node_b.as_ref().push();
-        let node_c = pin!(queue.build_token(Node::new(21).into()));
+        let node_c = pin!(queue.build_token(TestNode::new(21).into()));
         node_c.as_ref().push();
         let elements = queue.clone_to_vec();
         assert_eq!(elements, vec![21, 42, 32]);
@@ -432,24 +495,24 @@ mod tests {
         let elements = queue.clone_to_vec();
         assert_eq!(elements, vec![42, 32]);
 
-        assert!(node_a.node.prev.get().not_null());
-        assert!(node_a.node.next.get().is_null());
+        assert!(node_a.node.get_node().prev.get().not_null());
+        assert!(node_a.node.get_node().next.get().is_null());
 
-        assert!(node_b.node.prev.get().is_null());
-        assert!(node_b.node.next.get().not_null());
+        assert!(node_b.node.get_node().prev.get().is_null());
+        assert!(node_b.node.get_node().next.get().not_null());
 
-        assert!(node_c.node.next.get().is_null());
-        assert!(node_c.node.prev.get().is_null());
+        assert!(node_c.node.get_node().next.get().is_null());
+        assert!(node_c.node.get_node().prev.get().is_null());
     }
 
     #[test]
     fn revoke_tail() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = pin!(queue.build_token(Node::new(32).into()));
+        let node_a = pin!(queue.build_token(TestNode::new(32).into()));
         node_a.as_ref().push();
-        let node_b = pin!(queue.build_token(Node::new(42).into()));
+        let node_b = pin!(queue.build_token(TestNode::new(42).into()));
         node_b.as_ref().push();
-        let node_c = pin!(queue.build_token(Node::new(21).into()));
+        let node_c = pin!(queue.build_token(TestNode::new(21).into()));
         node_c.as_ref().push();
         let elements = queue.clone_to_vec();
         assert_eq!(elements, vec![21, 42, 32]);
@@ -457,24 +520,24 @@ mod tests {
         let elements = queue.clone_to_vec();
         assert_eq!(elements, vec![21, 42]);
 
-        assert!(node_a.node.prev.get().is_null());
-        assert!(node_a.node.next.get().is_null());
+        assert!(node_a.node.get_node().prev.get().is_null());
+        assert!(node_a.node.get_node().next.get().is_null());
 
-        assert!(node_b.node.prev.get().not_null());
-        assert!(node_b.node.next.get().is_null());
+        assert!(node_b.node.get_node().prev.get().not_null());
+        assert!(node_b.node.get_node().next.get().is_null());
 
-        assert!(node_c.node.next.get().not_null());
-        assert!(node_c.node.prev.get().is_null());
+        assert!(node_c.node.get_node().next.get().not_null());
+        assert!(node_c.node.get_node().prev.get().is_null());
     }
 
     #[test]
     fn revoke_middle() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = pin!(queue.build_token(Node::new(32).into()));
+        let node_a = pin!(queue.build_token(TestNode::new(32).into()));
         node_a.as_ref().push();
-        let node_b = pin!(queue.build_token(Node::new(42).into()));
+        let node_b = pin!(queue.build_token(TestNode::new(42).into()));
         node_b.as_ref().push();
-        let node_c = pin!(queue.build_token(Node::new(21).into()));
+        let node_c = pin!(queue.build_token(TestNode::new(21).into()));
         node_c.as_ref().push();
         let elements = queue.clone_to_vec();
 
@@ -483,24 +546,24 @@ mod tests {
         let elements = queue.clone_to_vec();
         assert_eq!(elements, vec![21, 32]);
 
-        assert!(node_a.node.prev.get().not_null());
-        assert!(node_a.node.next.get().is_null());
+        assert!(node_a.node.get_node().prev.get().not_null());
+        assert!(node_a.node.get_node().next.get().is_null());
 
-        assert!(node_b.node.prev.get().is_null());
-        assert!(node_b.node.next.get().is_null());
+        assert!(node_b.node.get_node().prev.get().is_null());
+        assert!(node_b.node.get_node().next.get().is_null());
 
-        assert!(node_c.node.next.get().not_null());
-        assert!(node_c.node.prev.get().is_null());
+        assert!(node_c.node.get_node().next.get().not_null());
+        assert!(node_c.node.get_node().prev.get().is_null());
     }
 
     #[test]
     fn drop_test() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = pin!(queue.build_token(Box::new(Node::new(32)).into()));
+        let node_a = pin!(queue.build_token(Box::new(TestNode::new(32)).into()));
         node_a.as_ref().push();
-        let node_c = pin!(queue.build_token(Box::new(Node::new(21)).into()));
+        let node_c = pin!(queue.build_token(Box::new(TestNode::new(21)).into()));
         {
-            let node_b = pin!(queue.build_token(Box::new(Node::new(42)).into()));
+            let node_b = pin!(queue.build_token(Box::new(TestNode::new(42)).into()));
             node_b.as_ref().push();
             node_c.as_ref().push();
 
@@ -512,17 +575,17 @@ mod tests {
     #[test]
     fn pop() {
         let queue = IntrusiveLinkedList::new();
-        let node_a = pin!(queue.build_token(Node::new(32).into()));
+        let node_a = pin!(queue.build_token(TestNode::new(32).into()));
         node_a.as_ref().push();
-        let node_b = pin!(queue.build_token(Node::new(42).into()));
+        let node_b = pin!(queue.build_token(TestNode::new(42).into()));
         node_b.as_ref().push();
-        let node_c = pin!(queue.build_token(Node::new(21).into()));
+        let node_c = pin!(queue.build_token(TestNode::new(21).into()));
         node_c.as_ref().push();
         assert_eq!(queue.clone_to_vec(), vec![21, 42, 32]);
 
         queue.pop_if(
             |v, len| {
-                assert_eq!(*v, 32);
+                assert_eq!(v.data, 32);
                 assert_eq!(len, 3);
                 Some(())
             },
@@ -531,7 +594,7 @@ mod tests {
         assert_eq!(queue.clone_to_vec(), vec![21, 42]);
         queue.pop_if(
             |v, len| {
-                assert_eq!(*v, 42);
+                assert_eq!(v.data, 42);
                 assert_eq!(len, 2);
                 Some(())
             },
@@ -540,7 +603,7 @@ mod tests {
         assert_eq!(queue.clone_to_vec(), vec![21]);
         queue.pop_if(
             |v, len| {
-                assert_eq!(*v, 21);
+                assert_eq!(v.data, 21);
                 assert_eq!(len, 1);
                 Some(())
             },
@@ -588,7 +651,7 @@ mod tests {
                     let mut tokens = Vec::with_capacity(num_elements);
                     barrier.wait();
                     for i in 0..num_elements {
-                        let token = Box::pin(queue.build_token(Node::new(i).into()));
+                        let token = Box::pin(queue.build_token(TestNode::new(i).into()));
                         token.as_ref().push();
                         tokens.push(token);
                     }
