@@ -11,7 +11,7 @@ const ONE_READER: usize = 0b10000;
 const READERS_MASK: usize = !0b1111;
 
 const fn num_readers(state: usize) -> usize {
-    (state & READERS_MASK) >> 4
+    state >> 4
 }
 
 #[derive(Debug, Default)]

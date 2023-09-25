@@ -325,8 +325,8 @@ where
     NODE: Node<NODE>,
 {
     fn drop(&mut self) {
-        // it's possible that the node isn't actually on the queue even if is_pushed is true
-        // it's never possible that it's on the queue if is_pushed is false
+        // it's possible that the node isn't actually on the queue even if is_on_queue is true
+        // it's never possible that it's on the queue if is_on_queue is false
         if self.is_on_queue.get() {
             self.revoke();
         }
