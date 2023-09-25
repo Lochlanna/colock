@@ -19,9 +19,9 @@ pub struct IntrusiveLinkedList<T> {
     inner: InnerLock<IntrusiveLinkedListInner<T>>,
 }
 
-impl<T> Debug for IntrusiveLinkedList<T>
+impl<NODE> Debug for IntrusiveLinkedList<NODE>
 where
-    T: Debug + Node<T>,
+    NODE: Debug + Node<NODE>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let guard = self.inner.lock();
@@ -31,7 +31,7 @@ where
     }
 }
 
-impl<T> IntrusiveLinkedList<T> {
+impl<NODE> IntrusiveLinkedList<NODE> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -40,9 +40,9 @@ impl<T> IntrusiveLinkedList<T> {
     }
 }
 
-impl<T> IntrusiveLinkedList<T>
+impl<NODE> IntrusiveLinkedList<NODE>
 where
-    T: HasNode<T>,
+    NODE: HasNode<NODE>,
 {
     /// Pops the tail from the list if the condition is true
     ///
@@ -52,7 +52,7 @@ where
     /// Refer to [`IntrusiveLinkedListInner::pop_if`] for more information.
     pub fn pop_if<R>(
         &self,
-        condition: impl FnOnce(&T, usize) -> Option<R>,
+        condition: impl FnOnce(&NODE, usize) -> Option<R>,
         on_empty: impl FnOnce(),
     ) -> Option<R> {
         let mut inner = self.inner.lock();
@@ -63,14 +63,14 @@ where
     ///
     /// Node that this does not push the node onto the list.
     #[must_use]
-    pub const fn new_node_data() -> NodeData<T> {
+    pub const fn new_node_data() -> NodeData<NODE> {
         NodeData::new()
     }
 
     /// Build a token that references this list
-    pub const fn build_token<'a>(&'a self, node: T) -> ListToken<'a, T>
+    pub const fn build_token<'a>(&'a self, node: NODE) -> ListToken<'a, NODE>
     where
-        T: 'a,
+        NODE: 'a,
     {
         ListToken {
             is_on_queue: Cell::new(false),
@@ -89,13 +89,13 @@ where
     }
 }
 
-struct IntrusiveLinkedListInner<T> {
-    head: *const T,
-    tail: *const T,
+struct IntrusiveLinkedListInner<NODE> {
+    head: *const NODE,
+    tail: *const NODE,
     length: usize,
 }
 
-unsafe impl<T> Send for IntrusiveLinkedListInner<T> {}
+unsafe impl<NODE> Send for IntrusiveLinkedListInner<NODE> {}
 
 impl<T> Default for IntrusiveLinkedListInner<T> {
     fn default() -> Self {
@@ -103,7 +103,7 @@ impl<T> Default for IntrusiveLinkedListInner<T> {
     }
 }
 
-impl<T> IntrusiveLinkedListInner<T> {
+impl<NODE> IntrusiveLinkedListInner<NODE> {
     const fn new() -> Self {
         Self {
             head: core::ptr::null(),
@@ -113,9 +113,9 @@ impl<T> IntrusiveLinkedListInner<T> {
     }
 }
 
-impl<T> IntrusiveLinkedListInner<T>
+impl<NODE> IntrusiveLinkedListInner<NODE>
 where
-    T: Node<T>,
+    NODE: Node<NODE>,
 {
     /// Pops the tail from the list if the condition is true
     /// note that this function does return the value that was popped.
@@ -125,7 +125,7 @@ where
     /// returned from the condition check.
     fn pop_if<R>(
         &mut self,
-        condition: impl FnOnce(&T, usize) -> Option<R>,
+        condition: impl FnOnce(&NODE, usize) -> Option<R>,
         on_empty: impl FnOnce(),
     ) -> Option<R> {
         if self.head.is_null() {
@@ -151,9 +151,9 @@ where
 }
 
 #[allow(clippy::missing_fields_in_debug)]
-impl<T> Debug for IntrusiveLinkedListInner<T>
+impl<NODE> Debug for IntrusiveLinkedListInner<NODE>
 where
-    T: Debug + Node<T>,
+    NODE: Debug + Node<NODE>,
 {
     /// An unconventional debug implementation but it's much more useful for debugging
     /// than simply printing the pointer values
@@ -203,15 +203,15 @@ trait Node<S>: HasNode<S> {
 /// This node should be embedded within another struct and pinned before it is pushed to the list
 /// If it moves while on the list it will invalidate the list!
 #[derive(Debug)]
-pub struct NodeData<S> {
-    next: Cell<*const S>,
-    prev: Cell<*const S>,
+pub struct NodeData<OUTER> {
+    next: Cell<*const OUTER>,
+    prev: Cell<*const OUTER>,
     is_on_queue: Cell<bool>,
 }
 
-unsafe impl<T> Send for NodeData<T> where T: Send {}
+unsafe impl<OUTER> Send for NodeData<OUTER> where OUTER: Send {}
 
-impl<T> NodeData<T> {
+impl<OUTER> NodeData<OUTER> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -221,18 +221,18 @@ impl<T> NodeData<T> {
         }
     }
 }
-impl<S> Node<S> for S
+impl<OUTER> Node<OUTER> for OUTER
 where
-    S: HasNode<S>,
+    OUTER: HasNode<OUTER>,
 {
     /// helper method to unconditionally push the node to the front of the queue
-    fn push(&self, queue: &mut IntrusiveLinkedListInner<S>) {
+    fn push(&self, queue: &mut IntrusiveLinkedListInner<OUTER>) {
         self.push_if(queue, |_| true);
     }
 
     fn push_if(
         &self,
-        queue: &mut IntrusiveLinkedListInner<S>,
+        queue: &mut IntrusiveLinkedListInner<OUTER>,
         condition: impl FnOnce(usize) -> bool,
     ) -> bool {
         let inner_node = self.get_node();
@@ -260,7 +260,7 @@ where
 
     /// If the node is on the queue it will be removed and true will be returned.
     /// If the node wasn't already on the queue false will be returned.
-    fn revoke(&self, queue: &mut IntrusiveLinkedListInner<S>) -> bool {
+    fn revoke(&self, queue: &mut IntrusiveLinkedListInner<OUTER>) -> bool {
         if !self.get_node().is_on_queue.replace(false) {
             return false;
         }
@@ -269,7 +269,7 @@ where
     }
 
     /// Removes the node from the queue.
-    fn remove(&self, queue: &mut IntrusiveLinkedListInner<S>) {
+    fn remove(&self, queue: &mut IntrusiveLinkedListInner<OUTER>) {
         let inner_node = self.get_node();
         queue.length -= 1;
 
@@ -310,19 +310,19 @@ where
 ///
 /// Once the token has been pushed to the list it cannot be moved again. Even if it's revoked.
 #[derive(Debug)]
-pub struct ListToken<'a, T>
+pub struct ListToken<'a, NODE>
 where
-    T: HasNode<T>,
+    NODE: HasNode<NODE>,
 {
     is_on_queue: Cell<bool>,
-    queue: &'a IntrusiveLinkedList<T>,
-    node: T,
+    queue: &'a IntrusiveLinkedList<NODE>,
+    node: NODE,
     _unpin: core::marker::PhantomPinned,
 }
 
-impl<'a, T> Drop for ListToken<'a, T>
+impl<'a, NODE> Drop for ListToken<'a, NODE>
 where
-    T: Node<T>,
+    NODE: Node<NODE>,
 {
     fn drop(&mut self) {
         // it's possible that the node isn't actually on the queue even if is_pushed is true
@@ -333,9 +333,9 @@ where
     }
 }
 
-impl<'a, T> ListToken<'a, T>
+impl<'a, NODE> ListToken<'a, NODE>
 where
-    T: Node<T>,
+    NODE: HasNode<NODE>,
 {
     /// Push the node onto the front of the queue.
     pub fn push(self: Pin<&Self>) {
@@ -359,8 +359,8 @@ where
         self.node.revoke(&mut queue)
     }
 
-    /// Access the inner value of the node.
-    pub fn inner(&self) -> &T {
+    /// Access the inner value of the token.
+    pub const fn inner(&self) -> &NODE {
         &self.node
     }
 
