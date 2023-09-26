@@ -1,38 +1,29 @@
+use core::sync::atomic::AtomicUsize;
 use event::Event;
-use lock_api::RawRwLock as RawRWLockApi;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use lock_api::RawRwLock as RawRwLockApi;
+use lock_api::RawRwLockTimed as RawRwLockTimedApi;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-const SHARED_LOCK: usize = 0b1;
-const EXCLUSIVE_LOCK: usize = 0b10;
-const SHARED_WAITING: usize = 0b100;
-const EXCLUSIVE_WAITING: usize = 0b1000;
-const ONE_READER: usize = 0b10000;
-const READERS_MASK: usize = !0b1111;
-
-const fn num_readers(state: usize) -> usize {
-    state >> 4
-}
-
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RawRwLock {
     state: AtomicUsize,
-    read_queue: Event,
-    write_queue: Event,
+    reader_queue: Event,
+    writer_queue: Event,
 }
 
 impl RawRwLock {
     pub const fn new() -> Self {
         Self {
             state: AtomicUsize::new(0),
-            read_queue: Event::new(),
-            write_queue: Event::new(),
+            reader_queue: Event::new(),
+            writer_queue: Event::new(),
         }
     }
 
-    fn lock_shared_once(&self, state: &mut usize) -> bool {
-        while *state & (EXCLUSIVE_LOCK | EXCLUSIVE_WAITING) == 0 {
-            let target = (*state + ONE_READER) | SHARED_LOCK;
+    fn try_lock_shared_inner(&self, state: &mut usize) -> bool {
+        while !state.is_exclusive_locked() {
+            let target = (*state | SHARED_LOCK) + ONE_SHARED;
             if let Err(new_state) = self.state.compare_exchange_weak(
                 *state,
                 target,
@@ -40,15 +31,16 @@ impl RawRwLock {
                 Ordering::Relaxed,
             ) {
                 *state = new_state;
-            } else {
-                return true;
+                continue;
             }
+            *state = target;
+            return true;
         }
         false
     }
 
-    fn lock_exclusive_once(&self, state: &mut usize) -> bool {
-        while *state & (EXCLUSIVE_LOCK | SHARED_LOCK) == 0 {
+    fn try_lock_exclusive_inner(&self, state: &mut usize) -> bool {
+        while !state.is_locked() {
             let target = *state | EXCLUSIVE_LOCK;
             if let Err(new_state) = self.state.compare_exchange_weak(
                 *state,
@@ -57,163 +49,192 @@ impl RawRwLock {
                 Ordering::Relaxed,
             ) {
                 *state = new_state;
-            } else {
-                return true;
+                continue;
             }
+            *state = target;
+            return true;
         }
         false
     }
 
-    const fn conditional_register_shared(&self) -> impl Fn(usize) -> bool + '_ {
-        |_| {
-            let mut state = self.state.load(Ordering::Relaxed);
+    fn lock_shared_wait_conditions(&self) -> (impl Fn(usize) -> bool + '_, impl Fn() -> bool + '_) {
+        let should_sleep = |_| {
+            let mut state = self.state.load(Ordering::Acquire);
             loop {
-                let (target, ordering) = if state == 0 {
-                    ((SHARED_LOCK + ONE_READER), Ordering::Acquire)
-                } else if state & (EXCLUSIVE_LOCK | EXCLUSIVE_WAITING) == 0 {
-                    debug_assert!(state & SHARED_LOCK != 0);
-                    // it is already shared locked so we just add to it
-                    (state + ONE_READER, Ordering::Relaxed)
+                if state.is_exclusive_locked() && state.shared_waiting() {
+                    return true;
+                }
+                let target;
+                let ordering;
+                if state.is_exclusive_locked() {
+                    target = state | SHARED_WAITING;
+                    ordering = Ordering::Relaxed;
+                } else if state.is_shared_locked() {
+                    target = state + ONE_SHARED;
+                    ordering = Ordering::Relaxed;
                 } else {
-                    // it is exclusively locked or waiting to be exclusively locked
-                    ((state + ONE_READER) | SHARED_WAITING, Ordering::Relaxed)
-                };
+                    target = (state + ONE_SHARED) | SHARED_LOCK;
+                    ordering = Ordering::Acquire;
+                }
                 match self
                     .state
                     .compare_exchange_weak(state, target, ordering, Ordering::Relaxed)
                 {
                     Ok(_) => {
-                        if state & (EXCLUSIVE_LOCK | EXCLUSIVE_WAITING) == 0 {
-                            // we got the lock!
+                        if !state.is_locked() {
                             return false;
                         }
-                        // we registered to wait!
                         return true;
                     }
                     Err(new_state) => state = new_state,
                 }
             }
-        }
+        };
+        let should_wake = || RawRwLockApi::try_lock_shared(self);
+        (should_sleep, should_wake)
+    }
+    fn lock_shared_slow(&self) {
+        let (should_sleep, should_wake) = self.lock_shared_wait_conditions();
+        self.reader_queue.wait_while(should_sleep, should_wake);
     }
 
-    const fn conditional_register_exclusive(&self) -> impl Fn(usize) -> bool + '_ {
-        |_| {
-            let mut state = self.state.load(Ordering::Relaxed);
+    fn lock_shared_slow_timed(&self, timeout: Instant) -> bool {
+        let (should_sleep, should_wake) = self.lock_shared_wait_conditions();
+        self.reader_queue
+            .wait_while_until(should_sleep, should_wake, timeout)
+    }
+
+    fn lock_exclusive_wait_conditions(
+        &self,
+    ) -> (impl Fn(usize) -> bool + '_, impl Fn() -> bool + '_) {
+        let should_sleep = |_| {
+            let mut state = self.state.load(Ordering::Acquire);
             loop {
-                let (target, ordering) = if state & (SHARED_LOCK | EXCLUSIVE_LOCK) == 0 {
-                    (EXCLUSIVE_LOCK, Ordering::Acquire)
-                } else if state & EXCLUSIVE_WAITING != 0 {
+                if state.is_locked() && state.exclusive_waiting() {
                     return true;
-                } else {
+                }
+                let (target, ordering) = if state.is_locked() {
                     (state | EXCLUSIVE_WAITING, Ordering::Relaxed)
+                } else {
+                    (state | EXCLUSIVE_LOCK, Ordering::Acquire)
                 };
                 match self
                     .state
                     .compare_exchange_weak(state, target, ordering, Ordering::Relaxed)
                 {
                     Ok(_) => {
-                        if state & (SHARED_LOCK | EXCLUSIVE_LOCK) == 0 {
-                            // we got the lock!
+                        if !state.is_locked() {
                             return false;
                         }
-                        // we registered to wait!
                         return true;
                     }
                     Err(new_state) => state = new_state,
                 }
             }
-        }
+        };
+        let should_wake = || RawRwLockApi::try_lock_exclusive(self);
+        (should_sleep, should_wake)
     }
 
-    const fn should_wake_shared(&self) -> impl Fn() -> bool + '_ {
-        || {
-            let mut state = self.state.load(Ordering::Relaxed);
-            while state & (EXCLUSIVE_LOCK | EXCLUSIVE_WAITING) == 0 {
-                if let Err(new_state) = self.state.compare_exchange_weak(
-                    state,
-                    state | SHARED_LOCK,
-                    Ordering::Acquire,
-                    Ordering::Relaxed,
-                ) {
-                    state = new_state;
-                } else {
-                    return true;
-                }
-            }
-            false
-        }
+    fn lock_exclusive_slow(&self) {
+        let (should_sleep, should_wake) = self.lock_exclusive_wait_conditions();
+        self.reader_queue.wait_while(should_sleep, should_wake);
+        debug_assert!(self.state.load(Ordering::Relaxed).is_exclusive_locked());
     }
 
-    const fn should_wake_exclusive(&self) -> impl Fn() -> bool + '_ {
-        || {
-            let mut state = self.state.load(Ordering::Relaxed);
-            self.lock_exclusive_once(&mut state)
-        }
+    fn lock_exclusive_slow_timed(&self, timeout: Instant) -> bool {
+        let (should_sleep, should_wake) = self.lock_exclusive_wait_conditions();
+        self.reader_queue
+            .wait_while_until(should_sleep, should_wake, timeout)
     }
 
-    const fn conditional_notify_exclusive(&self) -> impl Fn(usize) -> bool + '_ {
-        |num_waiters_left| {
-            let state = self.state.load(Ordering::Relaxed);
-            if state & (EXCLUSIVE_LOCK | SHARED_LOCK) != 0 {
-                //the lock has already been locked by someone else don't bother waking a thread
-                return false;
-            }
-            if num_waiters_left == 1 {
-                self.state.fetch_and(!EXCLUSIVE_WAITING, Ordering::Relaxed);
-            }
-            true
-        }
-    }
-
-    const fn conditional_notify_shared(&self) -> impl Fn(usize) -> bool + '_ {
-        |num_waiters_left| {
-            let state = self.state.load(Ordering::Relaxed);
-            if state & EXCLUSIVE_LOCK != 0 {
-                //the lock has already been locked by someone else don't bother waking a thread
-                return false;
-            }
-            if num_waiters_left == 1 {
-                self.state.fetch_and(!SHARED_WAITING, Ordering::Relaxed);
-            }
-            true
-        }
-    }
-
-    fn handle_wake(&self, state: usize) {
-        if state & EXCLUSIVE_WAITING != 0 {
-            // there is a writer waiting so we will wake them
-            self.write_queue
-                .notify_if(self.conditional_notify_exclusive(), || {
+    fn shared_notify(&self, state: usize) {
+        // try writers if no readers were notified
+        if state.exclusive_waiting() {
+            let did_notify = self.writer_queue.notify_if(
+                |num_left| {
+                    if num_left == 1 {
+                        self.state.fetch_and(!EXCLUSIVE_WAITING, Ordering::Relaxed);
+                    }
+                    true
+                },
+                || {
                     self.state.fetch_and(!EXCLUSIVE_WAITING, Ordering::Relaxed);
-                });
-        } else if state & SHARED_WAITING != 0 {
-            // there are readers waiting so we will wake them
-            self.read_queue
-                .notify_all_while(self.conditional_notify_shared(), || {
+                },
+            );
+            if did_notify {
+                return;
+            }
+        }
+
+        if state.shared_waiting() {
+            self.reader_queue.notify_all_while(
+                |num_left| {
+                    if num_left == 1 {
+                        self.state.fetch_and(!SHARED_WAITING, Ordering::Relaxed);
+                    }
+                    true
+                },
+                || {
                     self.state.fetch_and(!SHARED_WAITING, Ordering::Relaxed);
-                });
+                },
+            );
+        }
+    }
+
+    fn exclusive_notify(&self, state: usize) {
+        // writers should hand over to readers first
+        if state.shared_waiting() {
+            let num_notified = self.reader_queue.notify_all_while(
+                |num_left| {
+                    if num_left == 1 {
+                        self.state.fetch_and(!SHARED_WAITING, Ordering::Relaxed);
+                    }
+                    true
+                },
+                || {
+                    self.state.fetch_and(!SHARED_WAITING, Ordering::Relaxed);
+                },
+            );
+            if num_notified > 0 {
+                return;
+            }
+        }
+
+        // try writers if no readers were notified
+        if state.exclusive_waiting() {
+            self.writer_queue.notify_if(
+                |num_left| {
+                    if num_left == 1 {
+                        self.state.fetch_and(!EXCLUSIVE_WAITING, Ordering::Relaxed);
+                    }
+                    true
+                },
+                || {
+                    self.state.fetch_and(!EXCLUSIVE_WAITING, Ordering::Relaxed);
+                },
+            );
         }
     }
 
     pub async fn lock_shared_async(&self) {
         let Err(mut state) = self.state.compare_exchange_weak(
             0,
-            SHARED_LOCK | ONE_READER,
+            SHARED_LOCK | ONE_SHARED,
             Ordering::Acquire,
             Ordering::Relaxed,
         ) else {
             return;
         };
         // if it's not write locked and there are no writers waiting we are allowed to grab the shared lock
-        if self.lock_shared_once(&mut state) {
+        if self.try_lock_shared_inner(&mut state) {
             return;
         }
-        self.read_queue
-            .wait_while_async(
-                self.conditional_register_shared(),
-                self.should_wake_shared(),
-            )
+        let (should_sleep, should_wake) = self.lock_shared_wait_conditions();
+        self.reader_queue
+            .wait_while_async(should_sleep, should_wake)
             .await;
+        debug_assert!(self.state.load(Ordering::Relaxed).is_shared_locked());
     }
 
     pub async fn lock_exclusive_async(&self) {
@@ -225,69 +246,58 @@ impl RawRwLock {
         ) else {
             return;
         };
-        // if it's not write locked and there are no writers waiting we are allowed to grab the shared lock
-        if self.lock_exclusive_once(&mut state) {
+        if self.try_lock_exclusive_inner(&mut state) {
             return;
         }
-        // we failed to grab the lock, so we need to wait
-        self.write_queue
-            .wait_while_async(
-                self.conditional_register_exclusive(),
-                self.should_wake_exclusive(),
-            )
+        let (should_sleep, should_wake) = self.lock_exclusive_wait_conditions();
+        self.writer_queue
+            .wait_while_async(should_sleep, should_wake)
             .await;
+        debug_assert!(self.state.load(Ordering::Relaxed).is_exclusive_locked());
     }
 }
 
 unsafe impl lock_api::RawRwLock for RawRwLock {
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self::new();
-    type GuardMarker = ();
+    type GuardMarker = lock_api::GuardSend;
 
     fn lock_shared(&self) {
         let Err(mut state) = self.state.compare_exchange_weak(
             0,
-            SHARED_LOCK | ONE_READER,
+            SHARED_LOCK | ONE_SHARED,
             Ordering::Acquire,
             Ordering::Relaxed,
         ) else {
             return;
         };
-        // if it's not write locked and there are no writers waiting we are allowed to grab the shared lock
-        if self.lock_shared_once(&mut state) {
+        if self.try_lock_shared_inner(&mut state) {
             return;
         }
-        // we failed to grab the lock, so we need to wait
-        self.read_queue.wait_while(
-            self.conditional_register_shared(),
-            self.should_wake_shared(),
-        );
+        self.lock_shared_slow();
+        debug_assert!(self.state.load(Ordering::Relaxed).is_shared_locked());
     }
 
     fn try_lock_shared(&self) -> bool {
-        let mut state = self.state.load(Ordering::Relaxed);
-        // we can lock as long as it's not exclusively locked or waiting to be exclusively locked
-        self.lock_shared_once(&mut state)
+        let Err(mut state) = self.state.compare_exchange_weak(
+            0,
+            SHARED_LOCK | ONE_SHARED,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ) else {
+            return true;
+        };
+        self.try_lock_shared_inner(&mut state)
     }
 
     unsafe fn unlock_shared(&self) {
-        //optimistically attempt to unlock the lock
-        let Err(mut state) = self.state.compare_exchange_weak(
-            SHARED_LOCK | ONE_READER,
-            0,
-            Ordering::Release,
-            Ordering::Relaxed,
-        ) else {
-            return;
-        };
-        debug_assert!(state & SHARED_LOCK != 0);
-        debug_assert!(state & EXCLUSIVE_LOCK == 0);
+        let mut state = self.state.load(Ordering::Relaxed);
+
         loop {
-            debug_assert!(num_readers(state) > 0);
-            let (target, ordering) = if num_readers(state) == 1 {
-                (state & !READERS_MASK & !SHARED_LOCK, Ordering::Release)
+            let (target, ordering) = if state.num_shared() == 1 {
+                ((state - ONE_SHARED) & !SHARED_LOCK, Ordering::Release)
             } else {
-                (state - ONE_READER, Ordering::Relaxed)
+                (state - ONE_SHARED, Ordering::Relaxed)
             };
             if let Err(new_state) =
                 self.state
@@ -296,11 +306,15 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
                 state = new_state;
                 continue;
             }
-            if num_readers(state) == 1 {
-                // we were the last one (and unlocked the lock) so we should try to wake up waiting threads
-                self.handle_wake(target);
-            }
+            state = target;
+            break;
+        }
+        if state.is_shared_locked() {
+            // We weren't the last reader
             return;
+        }
+        if state.shared_waiting() || state.exclusive_waiting() {
+            self.shared_notify(state);
         }
     }
 
@@ -313,80 +327,76 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
         ) else {
             return;
         };
-        // if it's not write locked and there are no writers waiting we are allowed to grab the shared lock
-        if self.lock_exclusive_once(&mut state) {
+        if self.try_lock_exclusive_inner(&mut state) {
             return;
         }
-        // we failed to grab the lock, so we need to wait
-        self.write_queue.wait_while(
-            self.conditional_register_exclusive(),
-            self.should_wake_exclusive(),
-        );
+        self.lock_exclusive_slow();
+        debug_assert!(self.state.load(Ordering::Relaxed).is_exclusive_locked());
     }
 
     fn try_lock_exclusive(&self) -> bool {
-        let mut state = self.state.load(Ordering::Relaxed);
-        // we can lock as long as it's not at all locked
-        while state & (SHARED_LOCK | EXCLUSIVE_LOCK) == 0 {
-            if let Err(new_state) = self.state.compare_exchange_weak(
-                state,
-                state | EXCLUSIVE_LOCK,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
-                state = new_state;
-            } else {
-                return true;
-            }
-        }
-        false
-    }
-
-    unsafe fn unlock_exclusive(&self) {
-        let old_state = self.state.fetch_and(!EXCLUSIVE_LOCK, Ordering::Release);
-        self.handle_wake(old_state);
-    }
-}
-
-unsafe impl lock_api::RawRwLockTimed for RawRwLock {
-    type Duration = std::time::Duration;
-    type Instant = std::time::Instant;
-
-    fn try_lock_shared_for(&self, timeout: Self::Duration) -> bool {
-        if let Some(timeout) = Instant::now().checked_add(timeout) {
-            return self.try_lock_shared_until(timeout);
-        }
-        self.lock_shared();
-        true
-    }
-
-    fn try_lock_shared_until(&self, timeout: Self::Instant) -> bool {
         let Err(mut state) = self.state.compare_exchange_weak(
             0,
-            SHARED_LOCK | ONE_READER,
+            EXCLUSIVE_LOCK,
             Ordering::Acquire,
             Ordering::Relaxed,
         ) else {
             return true;
         };
-        // if it's not write locked and there are no writers waiting we are allowed to grab the shared lock
-        if self.lock_shared_once(&mut state) {
+        self.try_lock_exclusive_inner(&mut state)
+    }
+
+    unsafe fn unlock_exclusive(&self) {
+        let mut state = EXCLUSIVE_LOCK;
+        while let Err(new_state) = self.state.compare_exchange_weak(
+            state,
+            state & !EXCLUSIVE_LOCK,
+            Ordering::Release,
+            Ordering::Relaxed,
+        ) {
+            state = new_state;
+        }
+        if state.shared_waiting() || state.exclusive_waiting() {
+            self.exclusive_notify(state);
+        }
+    }
+
+    fn is_locked(&self) -> bool {
+        self.state.load(Ordering::Acquire).is_locked()
+    }
+
+    fn is_locked_exclusive(&self) -> bool {
+        self.state.load(Ordering::Acquire).is_exclusive_locked()
+    }
+}
+
+unsafe impl lock_api::RawRwLockTimed for RawRwLock {
+    type Duration = std::time::Duration;
+    type Instant = Instant;
+
+    fn try_lock_shared_for(&self, timeout: Self::Duration) -> bool {
+        let timeout = Instant::now() + timeout;
+        RawRwLockTimedApi::try_lock_shared_until(self, timeout)
+    }
+
+    fn try_lock_shared_until(&self, timeout: Self::Instant) -> bool {
+        let Err(mut state) = self.state.compare_exchange_weak(
+            0,
+            SHARED_LOCK | ONE_SHARED,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ) else {
+            return true;
+        };
+        if self.try_lock_shared_inner(&mut state) {
             return true;
         }
-        // we failed to grab the lock, so we need to wait
-        self.read_queue.wait_while_until(
-            self.conditional_register_shared(),
-            self.should_wake_shared(),
-            timeout,
-        )
+        self.lock_shared_slow_timed(timeout)
     }
 
     fn try_lock_exclusive_for(&self, timeout: Self::Duration) -> bool {
-        if let Some(timeout) = Instant::now().checked_add(timeout) {
-            return self.try_lock_exclusive_until(timeout);
-        }
-        self.lock_exclusive();
-        true
+        let timeout = Instant::now() + timeout;
+        RawRwLockTimedApi::try_lock_exclusive_until(self, timeout)
     }
 
     fn try_lock_exclusive_until(&self, timeout: Self::Instant) -> bool {
@@ -398,16 +408,84 @@ unsafe impl lock_api::RawRwLockTimed for RawRwLock {
         ) else {
             return true;
         };
-        // if it's not write locked and there are no writers waiting we are allowed to grab the shared lock
-        if self.lock_exclusive_once(&mut state) {
+        if self.try_lock_exclusive_inner(&mut state) {
             return true;
         }
-        // we failed to grab the lock, so we need to wait
-        self.write_queue.wait_while_until(
-            self.conditional_register_exclusive(),
-            self.should_wake_exclusive(),
-            timeout,
-        )
+        self.lock_exclusive_slow_timed(timeout)
+    }
+}
+
+unsafe impl lock_api::RawRwLockDowngrade for RawRwLock {
+    unsafe fn downgrade(&self) {
+        debug_assert!(self.state.load(Ordering::Relaxed).is_exclusive_locked());
+        let mut state = EXCLUSIVE_LOCK;
+        while let Err(new_state) = self.state.compare_exchange_weak(
+            state,
+            ((state & !EXCLUSIVE_LOCK) | SHARED_LOCK) + ONE_SHARED,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            state = new_state;
+        }
+        if state.shared_waiting() {
+            self.reader_queue.notify_all_while(
+                |num_left| {
+                    if num_left == 1 {
+                        self.state.fetch_and(!SHARED_WAITING, Ordering::Relaxed);
+                    }
+                    true
+                },
+                || {
+                    self.state.fetch_and(!SHARED_WAITING, Ordering::Relaxed);
+                },
+            );
+        }
+    }
+}
+
+const SHARED_LOCK: usize = 0b1;
+const EXCLUSIVE_LOCK: usize = 0b10;
+const SHARED_WAITING: usize = 0b100;
+const EXCLUSIVE_WAITING: usize = 0b1000;
+const ONE_SHARED: usize = 0b10000;
+const NUM_SHARED_MASK: usize = !0b1111;
+
+const fn num_readers(state: usize) -> usize {
+    state >> 4
+}
+
+trait RwLockState {
+    fn is_shared_locked(self) -> bool;
+    fn is_exclusive_locked(self) -> bool;
+    fn is_locked(self) -> bool;
+    fn shared_waiting(self) -> bool;
+    fn exclusive_waiting(self) -> bool;
+    fn num_shared(self) -> usize;
+}
+
+impl RwLockState for usize {
+    fn is_shared_locked(self) -> bool {
+        self & SHARED_LOCK != 0
+    }
+
+    fn is_exclusive_locked(self) -> bool {
+        self & EXCLUSIVE_LOCK != 0
+    }
+
+    fn is_locked(self) -> bool {
+        self & (SHARED_LOCK | EXCLUSIVE_LOCK) != 0
+    }
+
+    fn shared_waiting(self) -> bool {
+        self & SHARED_WAITING != 0
+    }
+
+    fn exclusive_waiting(self) -> bool {
+        self & EXCLUSIVE_WAITING != 0
+    }
+
+    fn num_shared(self) -> usize {
+        self >> 4
     }
 }
 
@@ -426,19 +504,19 @@ mod tests {
         lock.lock_shared();
         lock.lock_shared();
         let state = lock.state.load(Ordering::Relaxed);
-        assert_eq!(state, (ONE_READER * 3) | SHARED_LOCK);
+        assert_eq!(state, (ONE_SHARED * 3) | SHARED_LOCK);
 
         unsafe {
             lock.unlock_shared();
         }
         let state = lock.state.load(Ordering::Relaxed);
-        assert_eq!(state, (ONE_READER * 2) | SHARED_LOCK);
+        assert_eq!(state, (ONE_SHARED * 2) | SHARED_LOCK);
 
         unsafe {
             lock.unlock_shared();
         }
         let state = lock.state.load(Ordering::Relaxed);
-        assert_eq!(state, (ONE_READER * 1) | SHARED_LOCK);
+        assert_eq!(state, (ONE_SHARED * 1) | SHARED_LOCK);
 
         unsafe {
             lock.unlock_shared();
@@ -453,7 +531,7 @@ mod tests {
         assert!(lock.try_lock_shared());
         assert!(!lock.try_lock_exclusive());
         let state = lock.state.load(Ordering::Relaxed);
-        assert_eq!(state, ONE_READER | SHARED_LOCK);
+        assert_eq!(state, ONE_SHARED | SHARED_LOCK);
     }
 
     #[test]
@@ -482,11 +560,11 @@ mod tests {
         lock.lock_exclusive();
         assert_eq!(lock.state.load(Ordering::Relaxed), EXCLUSIVE_LOCK);
         barrier.wait();
-        while lock.read_queue.num_waiting() != 3 {
+        while lock.reader_queue.num_waiting() != 3 {
             std::thread::yield_now();
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
-        assert_eq!(lock.read_queue.num_waiting(), 3);
+        assert_eq!(lock.reader_queue.num_waiting(), 3);
         value.store(42, Ordering::Relaxed);
         unsafe {
             lock.unlock_exclusive();

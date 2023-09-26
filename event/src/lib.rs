@@ -55,8 +55,8 @@ impl<T> TaggedEvent<T> {
 
     pub fn notify_all_while(
         &self,
-        condition: impl Fn(usize, &T) -> bool,
-        on_empty: impl Fn(),
+        condition: impl FnMut(usize, &T) -> bool,
+        on_empty: impl FnMut(),
     ) -> usize {
         self.notify_many_while(usize::MAX, condition, on_empty)
     }
@@ -64,29 +64,36 @@ impl<T> TaggedEvent<T> {
     pub fn notify_many_while(
         &self,
         max: usize,
-        condition: impl Fn(usize, &T) -> bool,
-        on_empty: impl Fn(),
+        mut condition: impl FnMut(usize, &T) -> bool,
+        mut on_empty: impl FnMut(),
     ) -> usize {
         if max == 0 {
             return 0;
         }
         let num_waiting = Cell::new(max);
-        let get_count = |num_in_queue, metadata: &T| {
+        let mut get_count = |num_in_queue, metadata: &T| {
             num_waiting.set(num_waiting.get().min(num_in_queue));
             condition(num_in_queue, metadata)
         };
-        if !self.notify_if(get_count, &on_empty) {
+        if !self.notify_if(&mut get_count, &mut on_empty) {
             return 0;
         }
         let mut num_notified = 1;
         let max = num_waiting.get();
-        while num_notified < max && num_waiting.get() > 0 && self.notify_if(get_count, &on_empty) {
+        while num_notified < max
+            && num_waiting.get() > 0
+            && self.notify_if(&mut get_count, &mut on_empty)
+        {
             num_notified += 1;
         }
 
         num_notified
     }
-    pub fn notify_if(&self, condition: impl Fn(usize, &T) -> bool, on_empty: impl Fn()) -> bool {
+    pub fn notify_if(
+        &self,
+        mut condition: impl FnMut(usize, &T) -> bool,
+        on_empty: impl FnMut(),
+    ) -> bool {
         if let Some(unpark_handle) = self.queue.pop_if(
             |parker, num_left| {
                 if !condition(num_left, &parker.metadata) {
@@ -94,7 +101,7 @@ impl<T> TaggedEvent<T> {
                 }
                 Some(parker.handle.unpark_handle())
             },
-            &on_empty,
+            on_empty,
         ) {
             unsafe {
                 unpark_handle.unpark();
@@ -130,7 +137,7 @@ impl<T> TaggedEvent<T> {
         }
     }
 
-    pub fn wait_once(&self, will_sleep: impl Fn(usize) -> bool, metadata: T) {
+    pub fn wait_once(&self, will_sleep: impl FnMut(usize) -> bool, metadata: T) {
         self.wait_while(will_sleep, || true, metadata);
     }
 
@@ -167,8 +174,8 @@ impl<T> TaggedEvent<T> {
     //TODO refactor so there's one inner wait while func with optional timeout to reduce code replication
     pub fn wait_while(
         &self,
-        should_sleep: impl Fn(usize) -> bool,
-        should_wake: impl Fn() -> bool,
+        mut should_sleep: impl FnMut(usize) -> bool,
+        mut should_wake: impl FnMut() -> bool,
         metadata: T,
     ) {
         self.with_thread_token(
@@ -181,7 +188,7 @@ impl<T> TaggedEvent<T> {
                 unsafe {
                     parker.prepare_park();
                 }
-                while token.as_ref().push_if(&should_sleep) {
+                while token.as_ref().push_if(&mut should_sleep) {
                     unsafe {
                         parker.park();
                     }
@@ -203,8 +210,8 @@ impl<T> TaggedEvent<T> {
 
     pub fn wait_while_until(
         &self,
-        should_sleep: impl Fn(usize) -> bool,
-        should_wake: impl Fn() -> bool,
+        mut should_sleep: impl FnMut(usize) -> bool,
+        mut should_wake: impl FnMut() -> bool,
         timeout: Instant,
         metadata: T,
     ) -> bool {
@@ -215,13 +222,13 @@ impl<T> TaggedEvent<T> {
                     .handle
                     .thread_parker()
                     .expect("token should be a thread parker");
-                let did_time_out = Cell::new(false);
 
+                let mut did_time_out = false;
                 // extend the will sleep function with timeout check code
-                let will_sleep = |num_waiting| {
+                let mut will_sleep = |num_waiting| {
                     let now = Instant::now();
                     if now >= timeout {
-                        did_time_out.set(true);
+                        did_time_out = true;
                         return false;
                     }
                     should_sleep(num_waiting)
@@ -238,7 +245,7 @@ impl<T> TaggedEvent<T> {
                 unsafe {
                     parker.prepare_park();
                 }
-                while token.as_ref().push_if(will_sleep) {
+                while token.as_ref().push_if(&mut will_sleep) {
                     let was_woken = unsafe { parker.park_until(timeout) };
                     if !was_woken {
                         //TODO it should be possible to test this using a similar method to the async abort
@@ -266,7 +273,7 @@ impl<T> TaggedEvent<T> {
                         return false;
                     }
                 }
-                !did_time_out.get()
+                !did_time_out
             },
             metadata,
         )
@@ -366,8 +373,8 @@ impl Event {
 
     pub fn notify_all_while(
         &self,
-        condition: impl Fn(usize) -> bool,
-        on_empty: impl Fn(),
+        mut condition: impl FnMut(usize) -> bool,
+        on_empty: impl FnMut(),
     ) -> usize {
         let condition = |num_waiting, _: &_| condition(num_waiting);
         self.inner.notify_all_while(condition, on_empty)
@@ -376,14 +383,18 @@ impl Event {
     pub fn notify_many_while(
         &self,
         max: usize,
-        condition: impl Fn(usize) -> bool,
-        on_empty: impl Fn(),
+        mut condition: impl FnMut(usize) -> bool,
+        on_empty: impl FnMut(),
     ) -> usize {
         let condition = |num_waiting, _: &_| condition(num_waiting);
         self.inner.notify_many_while(max, condition, on_empty)
     }
 
-    pub fn notify_if(&self, condition: impl Fn(usize) -> bool, on_empty: impl Fn()) -> bool {
+    pub fn notify_if(
+        &self,
+        mut condition: impl FnMut(usize) -> bool,
+        on_empty: impl FnMut(),
+    ) -> bool {
         let condition = |num_waiting, _: &_| condition(num_waiting);
         self.inner.notify_if(condition, on_empty)
     }
@@ -401,18 +412,22 @@ impl Event {
         self.inner.wait_while_async(will_sleep, should_wake, ())
     }
 
-    pub fn wait_once(&self, will_sleep: impl Fn(usize) -> bool) {
+    pub fn wait_once(&self, will_sleep: impl FnMut(usize) -> bool) {
         self.inner.wait_once(will_sleep, ());
     }
 
-    pub fn wait_while(&self, should_sleep: impl Fn(usize) -> bool, should_wake: impl Fn() -> bool) {
+    pub fn wait_while(
+        &self,
+        should_sleep: impl FnMut(usize) -> bool,
+        should_wake: impl FnMut() -> bool,
+    ) {
         self.inner.wait_while(should_sleep, should_wake, ());
     }
 
     pub fn wait_while_until(
         &self,
-        should_sleep: impl Fn(usize) -> bool,
-        should_wake: impl Fn() -> bool,
+        should_sleep: impl FnMut(usize) -> bool,
+        should_wake: impl FnMut() -> bool,
         timeout: Instant,
     ) -> bool {
         self.inner

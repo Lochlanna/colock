@@ -52,8 +52,8 @@ where
     /// Refer to [`IntrusiveLinkedListInner::pop_if`] for more information.
     pub fn pop_if<R>(
         &self,
-        condition: impl FnOnce(&NODE, usize) -> Option<R>,
-        on_empty: impl FnOnce(),
+        condition: impl FnMut(&NODE, usize) -> Option<R>,
+        on_empty: impl FnMut(),
     ) -> Option<R> {
         let mut inner = self.inner.lock();
         inner.pop_if(condition, on_empty)
@@ -125,8 +125,8 @@ where
     /// returned from the condition check.
     fn pop_if<R>(
         &mut self,
-        condition: impl FnOnce(&NODE, usize) -> Option<R>,
-        on_empty: impl FnOnce(),
+        mut condition: impl FnMut(&NODE, usize) -> Option<R>,
+        mut on_empty: impl FnMut(),
     ) -> Option<R> {
         if self.head.is_null() {
             //it's empty!
@@ -193,7 +193,7 @@ trait Node<S>: HasNode<S> {
     fn push_if(
         &self,
         queue: &mut IntrusiveLinkedListInner<S>,
-        condition: impl FnOnce(usize) -> bool,
+        condition: impl FnMut(usize) -> bool,
     ) -> bool;
     fn revoke(&self, queue: &mut IntrusiveLinkedListInner<S>) -> bool;
     fn remove(&self, queue: &mut IntrusiveLinkedListInner<S>);
@@ -233,7 +233,7 @@ where
     fn push_if(
         &self,
         queue: &mut IntrusiveLinkedListInner<OUTER>,
-        condition: impl FnOnce(usize) -> bool,
+        mut condition: impl FnMut(usize) -> bool,
     ) -> bool {
         let inner_node = self.get_node();
         if !condition(queue.length) {
@@ -343,7 +343,7 @@ where
     }
 
     /// Conditionally push the node onto the front of the queue.
-    pub fn push_if(self: Pin<&Self>, condition: impl FnOnce(usize) -> bool) -> bool {
+    pub fn push_if(self: Pin<&Self>, condition: impl FnMut(usize) -> bool) -> bool {
         self.is_on_queue.set(true);
         let mut queue = self.queue.inner.lock();
         self.node.push_if(&mut queue, condition)
@@ -608,14 +608,14 @@ mod tests {
             || panic!("shouldn't fail"),
         );
         assert_eq!(queue.clone_to_vec(), vec![]);
-        let did_fail = Cell::new(false);
+        let mut did_fail = false;
         queue.pop_if(
             |_v, _len| -> Option<()> { panic!("shouldn't pop") },
             || {
-                did_fail.set(true);
+                did_fail = true;
             },
         );
-        assert!(did_fail.get());
+        assert!(did_fail);
     }
 
     fn do_pipe_test(num_elements: usize, num_senders: usize, num_receivers: usize) {
