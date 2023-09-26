@@ -81,7 +81,7 @@ impl RawRwLock {
                     .compare_exchange_weak(state, target, ordering, Ordering::Relaxed)
                 {
                     Ok(_) => {
-                        if !state.is_locked() {
+                        if !state.is_locked() || state.is_shared_locked() {
                             return false;
                         }
                         return true;
@@ -138,13 +138,13 @@ impl RawRwLock {
 
     fn lock_exclusive_slow(&self) {
         let (should_sleep, should_wake) = self.lock_exclusive_wait_conditions();
-        self.reader_queue.wait_while(should_sleep, should_wake);
+        self.writer_queue.wait_while(should_sleep, should_wake);
         debug_assert!(self.state.load(Ordering::Relaxed).is_exclusive_locked());
     }
 
     fn lock_exclusive_slow_timed(&self, timeout: Instant) -> bool {
         let (should_sleep, should_wake) = self.lock_exclusive_wait_conditions();
-        self.reader_queue
+        self.writer_queue
             .wait_while_until(should_sleep, should_wake, timeout)
     }
 
@@ -291,30 +291,26 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
     }
 
     unsafe fn unlock_shared(&self) {
-        let mut state = self.state.load(Ordering::Relaxed);
-
-        loop {
-            let (target, ordering) = if state.num_shared() == 1 {
-                ((state - ONE_SHARED) & !SHARED_LOCK, Ordering::Release)
-            } else {
-                (state - ONE_SHARED, Ordering::Relaxed)
-            };
-            if let Err(new_state) =
-                self.state
-                    .compare_exchange_weak(state, target, ordering, Ordering::Relaxed)
-            {
+        let mut state = self.state.fetch_sub(ONE_SHARED, Ordering::Relaxed);
+        debug_assert!(state.num_shared() > 0);
+        if state.num_shared() == 1 {
+            state = state - ONE_SHARED;
+            while let Err(new_state) = self.state.compare_exchange_weak(
+                state,
+                state & !SHARED_LOCK,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
                 state = new_state;
-                continue;
+                if state.num_shared() > 0 {
+                    // another reader has barged the lock
+                    return;
+                }
             }
-            state = target;
-            break;
-        }
-        if state.is_shared_locked() {
-            // We weren't the last reader
-            return;
-        }
-        if state.shared_waiting() || state.exclusive_waiting() {
-            self.shared_notify(state);
+            debug_assert_eq!(state.num_shared(), 0);
+            if state.shared_waiting() || state.exclusive_waiting() {
+                self.shared_notify(state);
+            }
         }
     }
 

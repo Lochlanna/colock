@@ -87,7 +87,8 @@ pub type RwLockWriteGuard<'a, T> = lock_api::RwLockWriteGuard<'a, RawRwLock, T>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::Rng;
+    use rand::{Rng, SeedableRng};
+    use rand_chacha::ChaCha20Rng;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::channel;
     use std::sync::Arc;
@@ -117,13 +118,13 @@ mod tests {
         let r = Arc::new(RwLock::new(()));
 
         let (tx, rx) = channel::<()>();
-        for _ in 0..N {
+        for i in 0..N {
             let tx = tx.clone();
             let r = r.clone();
+            let mut rng = ChaCha20Rng::seed_from_u64(u64::from(i));
             thread::spawn(move || {
-                let mut rng = rand::thread_rng();
-                for _ in 0..M {
-                    if rng.gen_bool(1.0 / N as f64) {
+                for p in 0..M {
+                    if rng.gen_bool(1.0 / f64::from(N)) {
                         drop(r.write());
                     } else {
                         drop(r.read());
