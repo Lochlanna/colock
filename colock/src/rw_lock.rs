@@ -117,11 +117,15 @@ mod tests {
 
         let r = Arc::new(RwLock::new(()));
 
+        // swap this for some set number to make the test run deterministically
+        let seed: u64 = rand::random();
+        println!("seed: {seed}");
+
         let (tx, rx) = channel::<()>();
         for i in 0..N {
             let tx = tx.clone();
             let r = r.clone();
-            let mut rng = ChaCha20Rng::seed_from_u64(u64::from(i));
+            let mut rng = ChaCha20Rng::seed_from_u64(u64::from(i) + seed);
             thread::spawn(move || {
                 for p in 0..M {
                     if rng.gen_bool(1.0 / f64::from(N)) {
