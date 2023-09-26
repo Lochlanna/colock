@@ -362,6 +362,7 @@ pub struct Event {
 }
 
 impl Event {
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             inner: TaggedEvent::new(),

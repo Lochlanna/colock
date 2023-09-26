@@ -294,7 +294,7 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
         let mut state = self.state.fetch_sub(ONE_SHARED, Ordering::Relaxed);
         debug_assert!(state.num_shared() > 0);
         if state.num_shared() == 1 {
-            state = state - ONE_SHARED;
+            state -= ONE_SHARED;
             while let Err(new_state) = self.state.compare_exchange_weak(
                 state,
                 state & !SHARED_LOCK,
@@ -450,7 +450,7 @@ const fn num_readers(state: usize) -> usize {
     state >> 4
 }
 
-trait RwLockState {
+trait RwLockState: Copy {
     fn is_shared_locked(self) -> bool;
     fn is_exclusive_locked(self) -> bool;
     fn is_locked(self) -> bool;
@@ -512,7 +512,7 @@ mod tests {
             lock.unlock_shared();
         }
         let state = lock.state.load(Ordering::Relaxed);
-        assert_eq!(state, (ONE_SHARED * 1) | SHARED_LOCK);
+        assert_eq!(state, ONE_SHARED | SHARED_LOCK);
 
         unsafe {
             lock.unlock_shared();

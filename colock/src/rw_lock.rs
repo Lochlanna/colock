@@ -93,7 +93,6 @@ mod tests {
     use std::sync::mpsc::channel;
     use std::sync::Arc;
     use std::thread;
-    use std::time::Duration;
 
     #[cfg(feature = "serde")]
     use bincode::{deserialize, serialize};
@@ -127,7 +126,7 @@ mod tests {
             let r = r.clone();
             let mut rng = ChaCha20Rng::seed_from_u64(u64::from(i) + seed);
             thread::spawn(move || {
-                for p in 0..M {
+                for _ in 0..M {
                     if rng.gen_bool(1.0 / f64::from(N)) {
                         drop(r.write());
                     } else {
@@ -382,7 +381,7 @@ mod tests {
             }));
         }
         for handle in handles {
-            handle.join().unwrap()
+            handle.join().unwrap();
         }
         assert_eq!(*x.read(), num_threads * num_iters);
     }
@@ -390,9 +389,9 @@ mod tests {
     fn test_rwlock_debug() {
         let x = RwLock::new(vec![0u8, 10]);
 
-        assert_eq!(format!("{:?}", x), "RwLock { data: [0, 10] }");
+        assert_eq!(format!("{x:?}"), "RwLock { data: [0, 10] }");
         let _lock = x.write();
-        assert_eq!(format!("{:?}", x), "RwLock { data: <locked> }");
+        assert_eq!(format!("{x:?}"), "RwLock { data: <locked> }");
     }
 
     #[cfg(feature = "serde")]

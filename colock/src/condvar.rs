@@ -16,7 +16,8 @@ pub struct WaitTimeoutResult(bool);
 impl WaitTimeoutResult {
     /// Returns whether the wait was known to have timed out.
     #[inline]
-    pub fn timed_out(self) -> bool {
+    #[must_use]
+    pub const fn timed_out(self) -> bool {
         self.0
     }
 }
@@ -46,6 +47,7 @@ pub struct Condvar {
 }
 
 impl Condvar {
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             wait_queue: Event::new(),
@@ -104,7 +106,7 @@ impl Condvar {
         move |_| {
             let current_mutex = self
                 .current_mutex
-                .swap(mutex as *const _ as *mut _, Ordering::Relaxed)
+                .swap((mutex as *const RawMutex).cast_mut(), Ordering::Relaxed)
                 .cast_const();
             assert!(
                 current_mutex.is_null() || current_mutex == mutex,
@@ -432,7 +434,7 @@ mod tests {
         });
         let timeout_res = c.wait_until(
             &mut g,
-            Instant::now() + Duration::from_millis(u32::max_value() as u64),
+            Instant::now() + Duration::from_millis(u64::from(u32::MAX)),
         );
         assert!(!timeout_res.timed_out());
         drop(g);
@@ -545,12 +547,6 @@ mod tests {
     #[test]
     #[should_panic]
     fn two_mutexes() {
-        let m = Arc::new(Mutex::new(()));
-        let m2 = m.clone();
-        let m3 = Arc::new(Mutex::new(()));
-        let c = Arc::new(Condvar::new());
-        let c2 = c.clone();
-
         // Make sure we don't leave the child thread dangling
         struct PanicGuard<'a>(&'a Condvar);
         impl<'a> Drop for PanicGuard<'a> {
@@ -558,6 +554,12 @@ mod tests {
                 self.0.notify_one();
             }
         }
+
+        let m = Arc::new(Mutex::new(()));
+        let m2 = m.clone();
+        let m3 = Arc::new(Mutex::new(()));
+        let c = Arc::new(Condvar::new());
+        let c2 = c.clone();
 
         let (tx, rx) = channel();
         let g = m.lock();
@@ -569,7 +571,7 @@ mod tests {
         drop(g);
         rx.recv().unwrap();
         let _g = m.lock();
-        let _guard = PanicGuard(&*c);
+        let _guard = PanicGuard(&c);
         c.wait(&mut m3.lock());
     }
 
@@ -668,7 +670,7 @@ mod webkit_queue_test {
     }
 
     impl Queue {
-        fn new() -> Self {
+        const fn new() -> Self {
             Self {
                 items: VecDeque::new(),
                 should_continue: true,
@@ -749,7 +751,7 @@ mod webkit_queue_test {
 
         thread::sleep(delay);
 
-        for producer in producers.into_iter() {
+        for producer in producers {
             producer.join().expect("Producer thread panicked");
         }
 
@@ -759,13 +761,13 @@ mod webkit_queue_test {
         }
         empty_condition.notify_all();
 
-        for consumer in consumers.into_iter() {
+        for consumer in consumers {
             consumer.join().expect("Consumer thread panicked");
         }
 
         let mut output_vec = output_vec.lock();
         assert_eq!(output_vec.len(), num_producers * messages_per_producer);
-        output_vec.sort();
+        output_vec.sort_unstable();
         for msg_idx in 0..messages_per_producer {
             for producer_idx in 0..num_producers {
                 assert_eq!(msg_idx, output_vec[msg_idx * num_producers + producer_idx]);
@@ -786,7 +788,7 @@ mod webkit_queue_test {
             let (should_notify, result) = {
                 let mut queue = input_queue.lock();
                 wait(
-                    &*empty_condition,
+                    &empty_condition,
                     &mut queue,
                     |state| -> bool { !state.items.is_empty() || !state.should_continue },
                     &timeout,
@@ -799,7 +801,7 @@ mod webkit_queue_test {
                 std::mem::drop(queue);
                 (should_notify, result)
             };
-            notify(notify_style, &*full_condition, should_notify);
+            notify(notify_style, &full_condition, should_notify);
 
             if let Some(result) = result {
                 output_queue.lock().push(result);
@@ -821,7 +823,7 @@ mod webkit_queue_test {
                 let should_notify = {
                     let mut queue = queue.lock();
                     wait(
-                        &*full_condition,
+                        &full_condition,
                         &mut queue,
                         |state| state.items.len() < max_queue_size,
                         &timeout,
@@ -831,7 +833,7 @@ mod webkit_queue_test {
                     std::mem::drop(queue);
                     should_notify
                 };
-                notify(notify_style, &*empty_condition, should_notify);
+                notify(notify_style, &empty_condition, should_notify);
             }
         })
     }
