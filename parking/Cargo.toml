@@ -8,6 +8,10 @@ edition = "2021"
 [dependencies]
 cfg-if = "1.0.0"
 
+[target.'cfg(loom)'.dependencies]
+loom = "0.7.1"
+dev_utils = {path="../dev_utils"}
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
@@ -16,3 +20,6 @@ redox_syscall = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-targets = "0.48"
+
+
+

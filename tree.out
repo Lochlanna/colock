@@ -1,0 +1,318 @@
+benchmarks v0.1.0 (/Users/lochlanna/development/colock4/benchmarks)
+├── async-trait v0.1.73 (proc-macro)
+│   ├── proc-macro2 v1.0.67
+│   │   └── unicode-ident v1.0.12
+│   ├── quote v1.0.33
+│   │   └── proc-macro2 v1.0.67 (*)
+│   └── syn v2.0.37
+│       ├── proc-macro2 v1.0.67 (*)
+│       ├── quote v1.0.33 (*)
+│       └── unicode-ident v1.0.12
+├── colock v0.1.0 (/Users/lochlanna/development/colock4/colock)
+│   ├── event v0.1.0 (/Users/lochlanna/development/colock4/event)
+│   │   ├── intrusive_list v0.1.0 (/Users/lochlanna/development/colock4/intrusive_list)
+│   │   │   └── mini_lock v0.1.0 (/Users/lochlanna/development/colock4/mini_lock)
+│   │   │       └── parking v0.1.0 (/Users/lochlanna/development/colock4/parking)
+│   │   │           ├── cfg-if v1.0.0
+│   │   │           └── libc v0.2.148
+│   │   │   [dev-dependencies]
+│   │   │   └── itertools v0.11.0
+│   │   │       └── either v1.9.0
+│   │   └── parking v0.1.0 (/Users/lochlanna/development/colock4/parking) (*)
+│   │   [dev-dependencies]
+│   │   ├── futures-polling v0.1.1
+│   │   ├── itertools v0.11.0 (*)
+│   │   ├── tokio v1.32.0
+│   │   │   ├── bytes v1.5.0
+│   │   │   ├── libc v0.2.148
+│   │   │   ├── mio v0.8.8
+│   │   │   │   └── libc v0.2.148
+│   │   │   ├── num_cpus v1.16.0
+│   │   │   │   └── libc v0.2.148
+│   │   │   ├── parking_lot v0.12.1
+│   │   │   │   ├── lock_api v0.4.10
+│   │   │   │   │   └── scopeguard v1.2.0
+│   │   │   │   │   [build-dependencies]
+│   │   │   │   │   └── autocfg v1.1.0
+│   │   │   │   └── parking_lot_core v0.9.8
+│   │   │   │       ├── cfg-if v1.0.0
+│   │   │   │       ├── libc v0.2.148
+│   │   │   │       └── smallvec v1.11.1
+│   │   │   ├── pin-project-lite v0.2.13
+│   │   │   ├── signal-hook-registry v1.4.1
+│   │   │   │   └── libc v0.2.148
+│   │   │   ├── socket2 v0.5.4
+│   │   │   │   └── libc v0.2.148
+│   │   │   └── tokio-macros v2.1.0 (proc-macro)
+│   │   │       ├── proc-macro2 v1.0.67 (*)
+│   │   │       ├── quote v1.0.33 (*)
+│   │   │       └── syn v2.0.37 (*)
+│   │   └── tokio-scoped v0.2.0
+│   │       ├── tokio v1.32.0 (*)
+│   │       └── tokio-stream v0.1.14
+│   │           ├── futures-core v0.3.28
+│   │           ├── pin-project-lite v0.2.13
+│   │           └── tokio v1.32.0 (*)
+│   └── lock_api v0.4.10 (https://github.com/Lochlanna/parking_lot.git?branch=public-guard-creation#7575c81a)
+│       └── scopeguard v1.2.0
+│       [build-dependencies]
+│       └── autocfg v1.1.0
+│   [dev-dependencies]
+│   ├── futures-polling v0.1.1
+│   ├── itertools v0.11.0 (*)
+│   ├── rand v0.8.5
+│   │   ├── libc v0.2.148
+│   │   ├── rand_chacha v0.3.1
+│   │   │   ├── ppv-lite86 v0.2.17
+│   │   │   └── rand_core v0.6.4
+│   │   │       └── getrandom v0.2.10
+│   │   │           ├── cfg-if v1.0.0
+│   │   │           └── libc v0.2.148
+│   │   └── rand_core v0.6.4 (*)
+│   ├── rand_chacha v0.3.1 (*)
+│   ├── tokio v1.32.0 (*)
+│   └── tokio-scoped v0.2.0 (*)
+├── criterion v0.5.1
+│   ├── anes v0.1.6
+│   ├── async-std v1.12.0
+│   │   ├── async-channel v1.9.0
+│   │   │   ├── concurrent-queue v2.3.0
+│   │   │   │   └── crossbeam-utils v0.8.16
+│   │   │   │       └── cfg-if v1.0.0
+│   │   │   ├── event-listener v2.5.3
+│   │   │   └── futures-core v0.3.28
+│   │   ├── async-global-executor v2.3.1
+│   │   │   ├── async-channel v1.9.0 (*)
+│   │   │   ├── async-executor v1.5.4
+│   │   │   │   ├── async-lock v2.8.0
+│   │   │   │   │   └── event-listener v2.5.3
+│   │   │   │   ├── async-task v4.4.1
+│   │   │   │   ├── concurrent-queue v2.3.0 (*)
+│   │   │   │   ├── fastrand v2.0.1
+│   │   │   │   ├── futures-lite v1.13.0
+│   │   │   │   │   ├── fastrand v1.9.0
+│   │   │   │   │   ├── futures-core v0.3.28
+│   │   │   │   │   ├── futures-io v0.3.28
+│   │   │   │   │   ├── memchr v2.6.4
+│   │   │   │   │   ├── parking v2.1.1
+│   │   │   │   │   ├── pin-project-lite v0.2.13
+│   │   │   │   │   └── waker-fn v1.1.1
+│   │   │   │   └── slab v0.4.9
+│   │   │   │       [build-dependencies]
+│   │   │   │       └── autocfg v1.1.0
+│   │   │   ├── async-io v1.13.0
+│   │   │   │   ├── async-lock v2.8.0 (*)
+│   │   │   │   ├── cfg-if v1.0.0
+│   │   │   │   ├── concurrent-queue v2.3.0 (*)
+│   │   │   │   ├── futures-lite v1.13.0 (*)
+│   │   │   │   ├── log v0.4.20
+│   │   │   │   │   └── value-bag v1.4.1
+│   │   │   │   ├── parking v2.1.1
+│   │   │   │   ├── polling v2.8.0
+│   │   │   │   │   ├── cfg-if v1.0.0
+│   │   │   │   │   ├── libc v0.2.148
+│   │   │   │   │   └── log v0.4.20 (*)
+│   │   │   │   │   [build-dependencies]
+│   │   │   │   │   └── autocfg v1.1.0
+│   │   │   │   ├── rustix v0.37.24
+│   │   │   │   │   ├── bitflags v1.3.2
+│   │   │   │   │   ├── errno v0.3.4
+│   │   │   │   │   │   └── libc v0.2.148
+│   │   │   │   │   ├── io-lifetimes v1.0.11
+│   │   │   │   │   │   └── libc v0.2.148
+│   │   │   │   │   └── libc v0.2.148
+│   │   │   │   ├── slab v0.4.9 (*)
+│   │   │   │   ├── socket2 v0.4.9
+│   │   │   │   │   └── libc v0.2.148
+│   │   │   │   └── waker-fn v1.1.1
+│   │   │   │   [build-dependencies]
+│   │   │   │   └── autocfg v1.1.0
+│   │   │   ├── async-lock v2.8.0 (*)
+│   │   │   ├── blocking v1.4.0
+│   │   │   │   ├── async-channel v1.9.0 (*)
+│   │   │   │   ├── async-lock v2.8.0 (*)
+│   │   │   │   ├── async-task v4.4.1
+│   │   │   │   ├── fastrand v2.0.1
+│   │   │   │   ├── futures-io v0.3.28
+│   │   │   │   ├── futures-lite v1.13.0 (*)
+│   │   │   │   ├── piper v0.2.1
+│   │   │   │   │   ├── atomic-waker v1.1.2
+│   │   │   │   │   ├── fastrand v2.0.1
+│   │   │   │   │   └── futures-io v0.3.28
+│   │   │   │   └── tracing v0.1.37
+│   │   │   │       ├── cfg-if v1.0.0
+│   │   │   │       ├── pin-project-lite v0.2.13
+│   │   │   │       └── tracing-core v0.1.31
+│   │   │   ├── futures-lite v1.13.0 (*)
+│   │   │   └── once_cell v1.18.0
+│   │   ├── async-io v1.13.0 (*)
+│   │   ├── async-lock v2.8.0 (*)
+│   │   ├── crossbeam-utils v0.8.16 (*)
+│   │   ├── futures-core v0.3.28
+│   │   ├── futures-io v0.3.28
+│   │   ├── futures-lite v1.13.0 (*)
+│   │   ├── kv-log-macro v1.0.7
+│   │   │   └── log v0.4.20 (*)
+│   │   ├── log v0.4.20 (*)
+│   │   ├── memchr v2.6.4
+│   │   ├── once_cell v1.18.0
+│   │   ├── pin-project-lite v0.2.13
+│   │   ├── pin-utils v0.1.0
+│   │   └── slab v0.4.9 (*)
+│   ├── cast v0.3.0
+│   ├── ciborium v0.2.1
+│   │   ├── ciborium-io v0.2.1
+│   │   ├── ciborium-ll v0.2.1
+│   │   │   ├── ciborium-io v0.2.1
+│   │   │   └── half v1.8.2
+│   │   └── serde v1.0.188
+│   │       └── serde_derive v1.0.188 (proc-macro)
+│   │           ├── proc-macro2 v1.0.67 (*)
+│   │           ├── quote v1.0.33 (*)
+│   │           └── syn v2.0.37 (*)
+│   ├── clap v4.4.6
+│   │   └── clap_builder v4.4.6
+│   │       ├── anstyle v1.0.4
+│   │       └── clap_lex v0.5.1
+│   ├── criterion-plot v0.5.0
+│   │   ├── cast v0.3.0
+│   │   └── itertools v0.10.5
+│   │       └── either v1.9.0
+│   ├── csv v1.2.2
+│   │   ├── csv-core v0.1.10
+│   │   │   └── memchr v2.6.4
+│   │   ├── itoa v1.0.9
+│   │   ├── ryu v1.0.15
+│   │   └── serde v1.0.188 (*)
+│   ├── futures v0.3.28
+│   │   ├── futures-channel v0.3.28
+│   │   │   ├── futures-core v0.3.28
+│   │   │   └── futures-sink v0.3.28
+│   │   ├── futures-core v0.3.28
+│   │   ├── futures-executor v0.3.28
+│   │   │   ├── futures-core v0.3.28
+│   │   │   ├── futures-task v0.3.28
+│   │   │   └── futures-util v0.3.28
+│   │   │       ├── futures-channel v0.3.28 (*)
+│   │   │       ├── futures-core v0.3.28
+│   │   │       ├── futures-io v0.3.28
+│   │   │       ├── futures-sink v0.3.28
+│   │   │       ├── futures-task v0.3.28
+│   │   │       ├── memchr v2.6.4
+│   │   │       ├── pin-project-lite v0.2.13
+│   │   │       ├── pin-utils v0.1.0
+│   │   │       └── slab v0.4.9 (*)
+│   │   ├── futures-io v0.3.28
+│   │   ├── futures-sink v0.3.28
+│   │   ├── futures-task v0.3.28
+│   │   └── futures-util v0.3.28 (*)
+│   ├── is-terminal v0.4.9
+│   │   └── rustix v0.38.15
+│   │       ├── bitflags v2.4.0
+│   │       ├── errno v0.3.4 (*)
+│   │       └── libc v0.2.148
+│   ├── itertools v0.10.5 (*)
+│   ├── num-traits v0.2.16
+│   │   [build-dependencies]
+│   │   └── autocfg v1.1.0
+│   ├── once_cell v1.18.0
+│   ├── oorandom v11.1.3
+│   ├── plotters v0.3.5
+│   │   ├── num-traits v0.2.16 (*)
+│   │   ├── plotters-backend v0.3.5
+│   │   └── plotters-svg v0.3.5
+│   │       └── plotters-backend v0.3.5
+│   ├── rayon v1.8.0
+│   │   ├── either v1.9.0
+│   │   └── rayon-core v1.12.0
+│   │       ├── crossbeam-deque v0.8.3
+│   │       │   ├── cfg-if v1.0.0
+│   │       │   ├── crossbeam-epoch v0.9.15
+│   │       │   │   ├── cfg-if v1.0.0
+│   │       │   │   ├── crossbeam-utils v0.8.16 (*)
+│   │       │   │   ├── memoffset v0.9.0
+│   │       │   │   │   [build-dependencies]
+│   │       │   │   │   └── autocfg v1.1.0
+│   │       │   │   └── scopeguard v1.2.0
+│   │       │   │   [build-dependencies]
+│   │       │   │   └── autocfg v1.1.0
+│   │       │   └── crossbeam-utils v0.8.16 (*)
+│   │       └── crossbeam-utils v0.8.16 (*)
+│   ├── regex v1.9.6
+│   │   ├── regex-automata v0.3.9
+│   │   │   └── regex-syntax v0.7.5
+│   │   └── regex-syntax v0.7.5
+│   ├── serde v1.0.188 (*)
+│   ├── serde_derive v1.0.188 (proc-macro) (*)
+│   ├── serde_json v1.0.107
+│   │   ├── itoa v1.0.9
+│   │   ├── ryu v1.0.15
+│   │   └── serde v1.0.188 (*)
+│   ├── smol v1.3.0
+│   │   ├── async-channel v1.9.0 (*)
+│   │   ├── async-executor v1.5.4 (*)
+│   │   ├── async-fs v1.6.0
+│   │   │   ├── async-lock v2.8.0 (*)
+│   │   │   ├── blocking v1.4.0 (*)
+│   │   │   └── futures-lite v1.13.0 (*)
+│   │   │   [build-dependencies]
+│   │   │   └── autocfg v1.1.0
+│   │   ├── async-io v1.13.0 (*)
+│   │   ├── async-lock v2.8.0 (*)
+│   │   ├── async-net v1.8.0
+│   │   │   ├── async-io v1.13.0 (*)
+│   │   │   ├── blocking v1.4.0 (*)
+│   │   │   └── futures-lite v1.13.0 (*)
+│   │   ├── async-process v1.7.0
+│   │   │   ├── async-io v1.13.0 (*)
+│   │   │   ├── async-lock v2.8.0 (*)
+│   │   │   ├── cfg-if v1.0.0
+│   │   │   ├── event-listener v2.5.3
+│   │   │   ├── futures-lite v1.13.0 (*)
+│   │   │   ├── rustix v0.37.24 (*)
+│   │   │   └── signal-hook v0.3.17
+│   │   │       ├── libc v0.2.148
+│   │   │       └── signal-hook-registry v1.4.1 (*)
+│   │   │   [build-dependencies]
+│   │   │   └── autocfg v1.1.0
+│   │   ├── blocking v1.4.0 (*)
+│   │   └── futures-lite v1.13.0 (*)
+│   ├── tinytemplate v1.2.1
+│   │   ├── serde v1.0.188 (*)
+│   │   └── serde_json v1.0.107 (*)
+│   ├── tokio v1.32.0 (*)
+│   └── walkdir v2.4.0
+│       └── same-file v1.0.6
+├── futures-polling v0.1.1
+├── itertools v0.11.0 (*)
+├── libc v0.2.148
+├── maitake-sync v0.1.0
+│   ├── cordyceps v0.3.2
+│   ├── mycelium-bitfield v0.1.3
+│   ├── pin-project v1.1.3
+│   │   └── pin-project-internal v1.1.3 (proc-macro)
+│   │       ├── proc-macro2 v1.0.67 (*)
+│   │       ├── quote v1.0.33 (*)
+│   │       └── syn v2.0.37 (*)
+│   └── portable-atomic v1.4.3
+├── mini_lock v0.1.0 (/Users/lochlanna/development/colock4/mini_lock) (*)
+├── parking_lot v0.12.1 (*)
+├── rand v0.8.5 (*)
+├── seqlock v0.2.0
+│   └── parking_lot v0.12.1 (*)
+├── tokio v1.32.0 (*)
+├── tokio-scoped v0.2.0 (*)
+└── usync v0.2.1
+    └── lock_api v0.4.10 (*)
+
+colock v0.1.0 (/Users/lochlanna/development/colock4/colock) (*)
+
+dev_utils v0.1.0 (/Users/lochlanna/development/colock4/dev_utils)
+
+event v0.1.0 (/Users/lochlanna/development/colock4/event) (*)
+
+intrusive_list v0.1.0 (/Users/lochlanna/development/colock4/intrusive_list) (*)
+
+mini_lock v0.1.0 (/Users/lochlanna/development/colock4/mini_lock) (*)
+
+parking v0.1.0 (/Users/lochlanna/development/colock4/parking) (*)

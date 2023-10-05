@@ -66,7 +66,7 @@ where
         }
         unsafe {
             self.raw().lock_async().await;
-            self.guard()
+            self.make_guard_unchecked()
         }
     }
 }

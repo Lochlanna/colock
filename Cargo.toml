@@ -6,7 +6,8 @@ members = [
     "mini_lock",
     "intrusive_list",
     "event",
-    "colock"
+    "colock",
+    "dev_utils"
 ]
 
 [profile.bench]

@@ -66,7 +66,7 @@ where
         }
         unsafe {
             self.raw().lock_shared_async().await;
-            self.read_guard()
+            self.make_read_guard_unchecked()
         }
     }
 
@@ -76,7 +76,7 @@ where
         }
         unsafe {
             self.raw().lock_exclusive_async().await;
-            self.write_guard()
+            self.make_write_guard_unchecked()
         }
     }
 }

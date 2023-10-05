@@ -46,6 +46,9 @@ cfg_if! {
     } else if #[cfg(windows)] {
         #[path = "windows/mod.rs"]
         mod imp;
+    }else if #[cfg(loom)] {
+        #[path = "loom.rs"]
+        mod imp;
     }
 }
 
