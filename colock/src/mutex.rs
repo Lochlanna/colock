@@ -59,6 +59,37 @@ impl<T> Mutex<T>
 where
     T: ?Sized,
 {
+    /// Asynchronously acquires the lock.
+    ///
+    /// If the lock is already held, the current task will be queued and awoken when the lock is
+    /// locked.
+    ///
+    /// It is safe to drop the returned future at any time, even once its been polled.
+    ///
+    /// # Examples
+    /// ```rust
+    ///# use colock::mutex::Mutex;
+    ///# tokio_test::block_on(async {
+    /// let mutex = Mutex::new(42);
+    /// let guard = mutex.lock_async().await;
+    /// assert_eq!(*guard, 42);
+    ///# });
+    /// ```
+    ///
+    /// ## Timeout
+    /// ```rust
+    ///# use tokio::select;
+    /// use colock::mutex::Mutex;
+    ///# tokio_test::block_on(async {
+    /// let mutex = Mutex::new(());
+    /// let _guard = mutex.lock();
+    /// //mutex is already locked so this call should timeout
+    /// select! {
+    ///   _ = mutex.lock_async() => { panic!("should have timed out")},
+    ///  _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => { assert!(mutex.is_locked())}
+    /// }
+    ///# });
+    /// ```
     #[inline]
     pub async fn lock_async(&self) -> MutexGuard<'_, T> {
         if let Some(guard) = self.try_lock() {
