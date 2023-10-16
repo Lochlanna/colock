@@ -5,6 +5,7 @@ use std::cell::UnsafeCell;
 use std::fmt::{Debug, Formatter};
 use std::mem::forget;
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 
 pub struct Mutex<T>
 where
@@ -29,8 +30,21 @@ impl<T> Debug for Mutex<T>
 where
     T: Debug,
 {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!("implement Debug for Mutex")
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        if let Some(guard) = self.try_lock() {
+            f.debug_struct("Mutex").field("data", &&*guard).finish()
+        } else {
+            struct LockedPlaceholder;
+            impl Debug for LockedPlaceholder {
+                fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+                    f.write_str("<locked>")
+                }
+            }
+
+            f.debug_struct("Mutex")
+                .field("data", &LockedPlaceholder)
+                .finish()
+        }
     }
 }
 
@@ -128,14 +142,20 @@ where
     }
 
     const fn make_guard_unchecked(&self) -> MutexGuard<'_, T> {
-        MutexGuard { inner: self }
+        MutexGuard { mutex: self }
     }
 
-    pub unsafe fn raw_unlock(&self) {
+    fn make_arc_guard_unchecked(self: &Arc<Self>) -> ArcMutexGuard<T> {
+        ArcMutexGuard {
+            mutex: self.clone(),
+        }
+    }
+
+    pub unsafe fn force_unlock(&self) {
         self.raw.unlock()
     }
 
-    pub unsafe fn raw_unlock_fair(&self) {
+    pub unsafe fn force_unlock_fair(&self) {
         self.raw.unlock_fair();
     }
 
@@ -150,13 +170,56 @@ where
     pub fn is_locked(&self) -> bool {
         self.raw.is_locked()
     }
+
+    pub fn is_unlocked(&self) -> bool {
+        !self.is_locked()
+    }
+
+    pub const fn data_ptr(&self) -> *mut T {
+        self.data.get()
+    }
+
+    pub fn lock_arc(self: &Arc<Self>) -> ArcMutexGuard<T> {
+        self.raw.lock();
+        self.make_arc_guard_unchecked()
+    }
+
+    pub fn try_lock_arc(self: &Arc<Self>) -> Option<ArcMutexGuard<T>> {
+        if self.raw.try_lock() {
+            Some(self.make_arc_guard_unchecked())
+        } else {
+            None
+        }
+    }
+
+    pub fn try_lock_arc_until(
+        self: &Arc<Self>,
+        timeout: std::time::Instant,
+    ) -> Option<ArcMutexGuard<T>> {
+        if self.raw.try_lock_until(timeout) {
+            Some(self.make_arc_guard_unchecked())
+        } else {
+            None
+        }
+    }
+
+    pub fn try_lock_arc_for(
+        self: &Arc<Self>,
+        timeout: std::time::Duration,
+    ) -> Option<ArcMutexGuard<T>> {
+        if self.raw.try_lock_for(timeout) {
+            Some(self.make_arc_guard_unchecked())
+        } else {
+            None
+        }
+    }
 }
 
 pub struct MutexGuard<'a, T>
 where
     T: ?Sized,
 {
-    inner: &'a Mutex<T>,
+    mutex: &'a Mutex<T>,
 }
 
 impl<T> Debug for MutexGuard<'_, T> {
@@ -171,7 +234,7 @@ where
 {
     fn drop(&mut self) {
         unsafe {
-            self.inner.raw_unlock();
+            self.mutex.force_unlock();
         }
     }
 }
@@ -183,7 +246,7 @@ where
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*self.inner.data.get() }
+        unsafe { &*self.mutex.data.get() }
     }
 }
 
@@ -192,24 +255,30 @@ where
     T: ?Sized,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.inner.data.get() }
+        unsafe { &mut *self.mutex.data.get() }
     }
+}
+
+pub trait Guard<'a> {
+    type Data: ?Sized;
+    fn mutex(guard: &'a Self) -> &'a Mutex<Self::Data>;
 }
 
 impl<'a, T> MutexGuard<'a, T>
 where
     T: ?Sized,
 {
-    pub const fn mutex(guard: &Self) -> &Mutex<T> {
-        guard.inner
+    #[must_use]
+    pub const fn mutex(guard: &Self) -> &'a Mutex<T> {
+        guard.mutex
     }
     pub fn bump(guard: &Self) {
         unsafe {
-            guard.inner.raw.bump();
+            guard.mutex.raw.bump();
         }
     }
     pub fn leak(guard: Self) -> &'a mut T {
-        let t = unsafe { &mut *guard.inner.data.get() };
+        let t = unsafe { &mut *guard.mutex.data.get() };
         forget(guard);
         t
     }
@@ -219,7 +288,7 @@ where
         F: FnOnce() -> R,
     {
         unsafe {
-            guard.inner.raw_unlock();
+            guard.mutex.force_unlock();
         }
         guard.unlocked_inner(f)
     }
@@ -229,7 +298,7 @@ where
         F: FnOnce() -> R,
     {
         unsafe {
-            guard.inner.raw_unlock_fair();
+            guard.mutex.force_unlock_fair();
         }
         guard.unlocked_inner(f)
     }
@@ -238,7 +307,91 @@ where
         F: FnOnce() -> R,
     {
         let r = f();
-        self.inner.lock();
+        self.mutex.lock();
+        r
+    }
+}
+
+pub struct ArcMutexGuard<T>
+where
+    T: ?Sized,
+{
+    mutex: Arc<Mutex<T>>,
+}
+
+impl<T> Debug for ArcMutexGuard<T>
+where
+    T: ?Sized,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
+}
+
+impl<T> Drop for ArcMutexGuard<T>
+where
+    T: ?Sized,
+{
+    fn drop(&mut self) {
+        unsafe {
+            self.mutex.raw.unlock();
+        }
+    }
+}
+
+impl<T> Deref for ArcMutexGuard<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.mutex.data.get() }
+    }
+}
+
+impl<T> DerefMut for ArcMutexGuard<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *self.mutex.data.get() }
+    }
+}
+
+impl<T> ArcMutexGuard<T>
+where
+    T: ?Sized,
+{
+    #[must_use]
+    pub const fn mutex(guard: &Self) -> &Arc<Mutex<T>> {
+        &guard.mutex
+    }
+    pub fn bump(guard: &Self) {
+        unsafe {
+            guard.mutex.raw.bump();
+        }
+    }
+
+    pub fn unlocked<F, R>(guard: &Self, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        unsafe {
+            guard.mutex.force_unlock();
+        }
+        guard.unlocked_inner(f)
+    }
+
+    pub fn unlocked_fair<F, R>(guard: &Self, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        unsafe {
+            guard.mutex.force_unlock_fair();
+        }
+        guard.unlocked_inner(f)
+    }
+    fn unlocked_inner<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let r = f();
+        self.mutex.lock();
         r
     }
 }
@@ -448,8 +601,19 @@ mod tests {
     }
 
     #[test]
-    fn debug() {
+    fn debug_unlocked() {
         let mutex = Mutex::new(32);
-        println!("{mutex:?}",);
+        let debug_str = format!("{:?}", mutex);
+        println!("{}", debug_str);
+        assert_eq!(debug_str, "Mutex { data: 32 }");
+    }
+
+    #[test]
+    fn debug_locked() {
+        let mutex = Mutex::new(32);
+        let _guard = mutex.lock();
+        let debug_str = format!("{:?}", mutex);
+        println!("{}", debug_str);
+        assert_eq!(debug_str, "Mutex { data: <locked> }");
     }
 }

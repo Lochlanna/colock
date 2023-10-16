@@ -7,6 +7,7 @@
 
 pub mod barrier;
 pub mod condvar;
+mod fair_mutex;
 pub mod mutex;
 pub mod raw_mutex;
 mod raw_rw_lock;
