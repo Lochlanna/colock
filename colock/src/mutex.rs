@@ -1,57 +1,36 @@
 use crate::raw_mutex::RawMutex;
-use lock_api;
 use std::fmt::{Debug, Formatter};
-use std::ops::{Deref, DerefMut};
+
+pub type MutexGuard<'a, T> = lock_api::MutexGuard<'a, RawMutex, T>;
 
 #[derive(Default)]
-pub struct Mutex<T>(lock_api::Mutex<RawMutex, T>)
+pub struct Mutex<T>
 where
-    T: ?Sized;
+    T: ?Sized,
+{
+    inner: lock_api::Mutex<RawMutex, T>,
+}
 
 impl<T> Debug for Mutex<T>
 where
     T: Debug,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl<T> Deref for Mutex<T>
-where
-    T: ?Sized,
-{
-    type Target = lock_api::Mutex<RawMutex, T>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T> DerefMut for Mutex<T>
-where
-    T: ?Sized,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        self.inner.fmt(f)
     }
 }
 
 impl<T> Mutex<T> {
     pub const fn new(val: T) -> Self {
-        Self(lock_api::Mutex::<RawMutex, T>::const_new(
-            RawMutex::new(),
-            val,
-        ))
+        Self {
+            inner: lock_api::Mutex::<RawMutex, T>::const_new(RawMutex::new(), val),
+        }
     }
     pub const fn const_new(val: T) -> Self {
         Self::new(val)
     }
-
-    // Consumes this mutex, returning the underlying data.
-    #[inline]
     pub fn into_inner(self) -> T {
-        self.0.into_inner()
+        self.inner.into_inner()
     }
 }
 
@@ -59,6 +38,144 @@ impl<T> Mutex<T>
 where
     T: ?Sized,
 {
+    #![allow(clippy::inline_always)]
+
+    /// Creates a new `MutexGuard` without checking if the mutex is locked.
+    ///
+    /// # Safety
+    ///
+    /// This method must only be called if the thread logically holds the lock.
+    ///
+    /// Calling this function when a guard has already been produced is undefined behaviour unless
+    /// the guard was forgotten with `mem::forget`.
+    #[inline(always)]
+    pub unsafe fn make_guard_unchecked(&self) -> MutexGuard<'_, T> {
+        self.inner.make_guard_unchecked()
+    }
+
+    /// Acquires a mutex, blocking the current thread until it is able to do so.
+    ///
+    /// This function will block the local thread until it is available to acquire
+    /// the mutex. Upon returning, the thread is the only thread with the mutex
+    /// held. An RAII guard is returned to allow scoped unlock of the lock. When
+    /// the guard goes out of scope, the mutex will be unlocked.
+    ///
+    /// Attempts to lock a mutex in the thread which already holds the lock will
+    /// result in a deadlock.
+    #[inline(always)]
+    pub fn lock(&self) -> MutexGuard<'_, T> {
+        self.inner.lock()
+    }
+
+    /// Attempts to acquire this lock.
+    ///
+    /// If the lock could not be acquired at this time, then `None` is returned.
+    /// Otherwise, an RAII guard is returned. The lock will be unlocked when the
+    /// guard is dropped.
+    ///
+    /// This function does not block.
+    #[inline(always)]
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+        self.inner.try_lock()
+    }
+
+    /// Returns a mutable reference to the underlying data.
+    ///
+    /// Since this call borrows the `Mutex` mutably, no actual locking needs to
+    /// take place---the mutable borrow statically guarantees no locks exist.
+    #[inline(always)]
+    pub fn get_mut(&mut self) -> &mut T {
+        self.inner.get_mut()
+    }
+
+    /// Checks whether the mutex is currently locked.
+    #[inline(always)]
+    pub fn is_locked(&self) -> bool {
+        self.inner.is_locked()
+    }
+
+    /// Forcibly unlocks the mutex.
+    ///
+    /// This is useful when combined with `mem::forget` to hold a lock without
+    /// the need to maintain a `MutexGuard` object alive, for example when
+    /// dealing with FFI.
+    ///
+    /// # Safety
+    ///
+    /// This method must only be called if the current thread logically owns a
+    /// `MutexGuard` but that guard has been discarded using `mem::forget`.
+    /// Behavior is undefined if a mutex is unlocked when not locked.
+    #[inline(always)]
+    pub unsafe fn force_unlock(&self) {
+        self.inner.force_unlock();
+    }
+
+    /// Returns the underlying raw mutex object.
+    ///
+    /// Note that you will most likely need to import the `RawMutex` trait from
+    /// `lock_api` to be able to call functions on the raw mutex.
+    ///
+    /// # Safety
+    ///
+    /// This method is unsafe because it allows unlocking a mutex while
+    /// still holding a reference to a `MutexGuard`.
+    #[inline(always)]
+    pub unsafe fn raw(&self) -> &RawMutex {
+        self.inner.raw()
+    }
+
+    /// Returns a raw pointer to the underlying data.
+    ///
+    /// This is useful when combined with `mem::forget` to hold a lock without
+    /// the need to maintain a `MutexGuard` object alive, for example when
+    /// dealing with FFI.
+    ///
+    /// # Safety
+    ///
+    /// You must ensure that there are no data races when dereferencing the
+    /// returned pointer, for example if the current thread logically owns
+    /// a `MutexGuard` but that guard has been discarded using `mem::forget`.
+    #[inline(always)]
+    pub fn data_ptr(&self) -> *mut T {
+        self.inner.data_ptr()
+    }
+
+    /// Forcibly unlocks the mutex using a fair unlock protocol.
+    ///
+    /// This is useful when combined with `mem::forget` to hold a lock without
+    /// the need to maintain a `MutexGuard` object alive, for example when
+    /// dealing with FFI.
+    ///
+    /// # Safety
+    ///
+    /// This method must only be called if the current thread logically owns a
+    /// `MutexGuard` but that guard has been discarded using `mem::forget`.
+    /// Behavior is undefined if a mutex is unlocked when not locked.
+    #[inline(always)]
+    pub unsafe fn force_unlock_fair(&self) {
+        self.inner.force_unlock_fair();
+    }
+
+    /// Attempts to acquire this lock until a timeout is reached.
+    ///
+    /// If the lock could not be acquired before the timeout expired, then
+    /// `None` is returned. Otherwise, an RAII guard is returned. The lock will
+    /// be unlocked when the guard is dropped.
+    #[inline(always)]
+    pub fn try_lock_for(&self, timeout: std::time::Duration) -> Option<MutexGuard<'_, T>> {
+        self.inner.try_lock_for(timeout)
+    }
+
+    /// Attempts to acquire this lock until a timeout is reached.
+    ///
+    /// If the lock could not be acquired before the timeout expired, then
+    /// `None` is returned. Otherwise, an RAII guard is returned. The lock will
+    /// be unlocked when the guard is dropped.
+    #[inline(always)]
+    pub fn try_lock_until(&self, timeout: std::time::Instant) -> Option<MutexGuard<'_, T>> {
+        self.inner.try_lock_until(timeout)
+    }
+
     /// Asynchronously acquires the lock.
     ///
     /// If the lock is already held, the current task will be queued and awoken when the lock is
@@ -92,17 +209,21 @@ where
     /// ```
     #[inline]
     pub async fn lock_async(&self) -> MutexGuard<'_, T> {
-        if let Some(guard) = self.try_lock() {
+        if let Some(guard) = self.inner.try_lock() {
             return guard;
         }
         unsafe {
-            self.raw().lock_async().await;
-            self.make_guard_unchecked()
+            self.inner.raw().lock_async().await;
+            self.inner.make_guard_unchecked()
         }
     }
 }
 
-pub type MutexGuard<'a, T> = lock_api::MutexGuard<'a, RawMutex, T>;
+impl<T> From<T> for Mutex<T> {
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -115,19 +236,6 @@ mod tests {
     #[derive(Eq, PartialEq, Debug)]
     struct NonCopy(i32);
 
-    trait Raw {
-        type RAW;
-
-        fn raw(&self) -> &Self::RAW;
-    }
-    impl<T> Raw for Mutex<T> {
-        type RAW = RawMutex;
-
-        fn raw(&self) -> &Self::RAW {
-            unsafe { self.0.raw() }
-        }
-    }
-
     #[test]
     fn it_works_threaded() {
         let mutex = Mutex::new(());
@@ -138,7 +246,7 @@ mod tests {
                 for _ in 0..num_iterations {
                     let guard = mutex.lock();
                     barrier.wait();
-                    while mutex.raw().queue().num_waiting() == 0 {
+                    while unsafe { mutex.raw() }.queue().num_waiting() == 0 {
                         thread::yield_now();
                     }
                     thread::sleep(Duration::from_millis(5));
@@ -168,7 +276,7 @@ mod tests {
                 for _ in 0..num_iterations {
                     let guard = mutex.lock_async().await;
                     barrier.wait().await;
-                    while mutex.raw().queue().num_waiting() == 0 {
+                    while unsafe { mutex.raw() }.queue().num_waiting() == 0 {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
                     tokio::time::sleep(Duration::from_millis(5)).await;

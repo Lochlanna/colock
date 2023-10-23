@@ -6,9 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-lock_api = {git = "https://github.com/Lochlanna/parking_lot.git", branch = "public-guard-creation"}
+lock_api = {version="0.4.11", features = []}
 event = {path = "../event"}
-
 
 [dev-dependencies]
 itertools = "0.11.0"
