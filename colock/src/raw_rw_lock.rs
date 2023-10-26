@@ -411,6 +411,46 @@ unsafe impl lock_api::RawRwLockTimed for RawRwLock {
     }
 }
 
+unsafe impl lock_api::RawRwLockFair for RawRwLock {
+    unsafe fn unlock_shared_fair(&self) {
+        todo!()
+    }
+
+    unsafe fn unlock_exclusive_fair(&self) {
+        todo!()
+    }
+
+    unsafe fn bump_shared(&self) {
+        todo!()
+    }
+
+    unsafe fn bump_exclusive(&self) {
+        todo!()
+    }
+}
+
+unsafe impl lock_api::RawRwLockUpgrade for RawRwLock {
+    fn lock_upgradable(&self) {
+        todo!()
+    }
+
+    fn try_lock_upgradable(&self) -> bool {
+        todo!()
+    }
+
+    unsafe fn unlock_upgradable(&self) {
+        todo!()
+    }
+
+    unsafe fn upgrade(&self) {
+        todo!()
+    }
+
+    unsafe fn try_upgrade(&self) -> bool {
+        todo!()
+    }
+}
+
 unsafe impl lock_api::RawRwLockDowngrade for RawRwLock {
     unsafe fn downgrade(&self) {
         debug_assert!(self.state.load(Ordering::Relaxed).is_exclusive_locked());
