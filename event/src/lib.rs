@@ -119,8 +119,8 @@ impl<T> TaggedEvent<T> {
         metadata: T,
     ) -> Poller<'_, T, S, W>
     where
-        S: Fn(usize) -> bool + Send,
-        W: Fn() -> bool + Send,
+        S: FnMut(usize) -> bool + Send,
+        W: FnMut() -> bool + Send,
     {
         let handle = Handle::Async(Cell::new(None));
         let node = IntrusiveNode {
@@ -286,8 +286,8 @@ impl<T> TaggedEvent<T> {
 
 pub struct Poller<'a, T, S, W>
 where
-    S: Fn(usize) -> bool + Send,
-    W: Fn() -> bool + Send,
+    S: FnMut(usize) -> bool + Send,
+    W: FnMut() -> bool + Send,
 {
     event: &'a TaggedEvent<T>,
     will_sleep: S,
@@ -298,16 +298,16 @@ where
 
 unsafe impl<T, S, W> Send for Poller<'_, T, S, W>
 where
-    S: Fn(usize) -> bool + Send,
-    W: Fn() -> bool + Send,
+    S: FnMut(usize) -> bool + Send,
+    W: FnMut() -> bool + Send,
     T: Send,
 {
 }
 
 impl<T, S, W> Drop for Poller<'_, T, S, W>
 where
-    S: Fn(usize) -> bool + Send,
-    W: Fn() -> bool + Send,
+    S: FnMut(usize) -> bool + Send,
+    W: FnMut() -> bool + Send,
 {
     fn drop(&mut self) {
         unsafe {
@@ -323,8 +323,8 @@ where
 
 impl<T, S, W> core::future::Future for Poller<'_, T, S, W>
 where
-    S: Fn(usize) -> bool + Send,
-    W: Fn() -> bool + Send,
+    S: FnMut(usize) -> bool + Send,
+    W: FnMut() -> bool + Send,
 {
     type Output = ();
 
@@ -346,7 +346,7 @@ where
             .replace_waker(cx.waker().clone());
 
         let pinned_token = unsafe { Pin::new_unchecked(&this.list_token) };
-        let did_push = pinned_token.push_if(&this.will_sleep);
+        let did_push = pinned_token.push_if(&mut this.will_sleep);
         if did_push {
             this.token_on_queue = true;
             Poll::Pending
@@ -407,8 +407,8 @@ impl Event {
         should_wake: W,
     ) -> Poller<'_, (), S, W>
     where
-        S: Fn(usize) -> bool + Send,
-        W: Fn() -> bool + Send,
+        S: FnMut(usize) -> bool + Send,
+        W: FnMut() -> bool + Send,
     {
         self.inner.wait_while_async(will_sleep, should_wake, ())
     }
