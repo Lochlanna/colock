@@ -21,19 +21,23 @@ impl<T> ToConst for Result<*mut T, *mut T> {
 /// const versions of the pointer rather than mutable versions. The API is otherwise the same as
 /// [`AtomicPtr<T>`]
 #[derive(Debug)]
-pub struct AtomicConstPtr<T>(AtomicPtr<T>);
+pub struct AtomicConstPtr<T> {
+    inner_ptr: AtomicPtr<T>,
+}
 
 impl<T> AtomicConstPtr<T> {
     pub const fn new(ptr: *const T) -> Self {
-        Self(AtomicPtr::new(ptr.cast_mut()))
+        Self {
+            inner_ptr: AtomicPtr::new(ptr.cast_mut()),
+        }
     }
 
     pub fn store(&self, ptr: *const T, order: Ordering) {
-        self.0.store(ptr.cast_mut(), order);
+        self.inner_ptr.store(ptr.cast_mut(), order);
     }
 
     pub fn load(&self, order: Ordering) -> *const T {
-        self.0.load(order).cast_const()
+        self.inner_ptr.load(order).cast_const()
     }
 
     pub fn compare_exchange(
@@ -43,7 +47,7 @@ impl<T> AtomicConstPtr<T> {
         success: Ordering,
         failure: Ordering,
     ) -> Result<*const T, *const T> {
-        self.0
+        self.inner_ptr
             .compare_exchange(current.cast_mut(), new.cast_mut(), success, failure)
             .to_const()
     }
@@ -55,12 +59,12 @@ impl<T> AtomicConstPtr<T> {
         success: Ordering,
         failure: Ordering,
     ) -> Result<*const T, *const T> {
-        self.0
+        self.inner_ptr
             .compare_exchange_weak(current.cast_mut(), new.cast_mut(), success, failure)
             .to_const()
     }
 
     pub fn swap(&self, ptr: *const T, order: Ordering) -> *const T {
-        self.0.swap(ptr.cast_mut(), order).cast_const()
+        self.inner_ptr.swap(ptr.cast_mut(), order).cast_const()
     }
 }

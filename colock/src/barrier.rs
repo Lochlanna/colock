@@ -1,14 +1,14 @@
-use crate::raw_mutex::RawMutex;
+use crate::mutex::{Mutex, MutexGuard};
 use event::Event;
-use lock_api::RawMutex as LockApiRawMutex;
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Debug)]
 pub struct Barrier {
     target: usize,
     wait_queue: Event,
-    queue_lock: RawMutex,
+    queue_lock: Mutex<usize>,
+    generation: AtomicUsize,
 }
 
 impl Barrier {
@@ -17,65 +17,76 @@ impl Barrier {
         Self {
             target: count,
             wait_queue: Event::new(),
-            queue_lock: RawMutex::new(),
+            queue_lock: Mutex::new(0),
+            generation: AtomicUsize::new(0),
         }
     }
 
+    /// Increments the internal count and blocks the thread until the count reaches the target if it
+    /// is not already at the target.
     pub fn wait(&self) {
         if self.target == 0 {
             return;
         }
         let wake_all = Cell::new(false);
-        self.queue_lock.lock();
-        self.wait_queue.wait_once(|num_waiting| {
-            if num_waiting == self.target - 1 {
-                wake_all.set(true);
-                return false;
+        let mut guard = Some(self.queue_lock.lock());
+        self.wait_queue.wait_once(|_| {
+            if let Some(num_waiting) = guard.as_mut() {
+                **num_waiting += 1;
+                if **num_waiting == self.target {
+                    wake_all.set(true);
+                    return false;
+                }
             }
-            unsafe {
-                self.queue_lock.unlock();
-            }
+            // we have to drop the guard here as returning true will put this thread to sleep
+            guard = None;
             true
         });
         if wake_all.get() {
-            debug_assert!(self.queue_lock.is_locked());
-            // we know threads cannot be added to the queue while we hold the lock
-            self.wait_queue.notify_all_while(|_| true, || {});
-            unsafe {
-                self.queue_lock.unlock();
-            }
+            self.wake_all(&mut guard);
         }
     }
 
+    /// Increments the internal count and waits until the count reaches the target if it
+    /// is not already at the target.
     pub async fn wait_async(&self) {
         if self.target == 0 {
             return;
         }
+        // we use an atomic here rather than a cell just to appease async send bounds. It doesn't
+        // actually get run from multiple threads. This means relaxed ordering is always fine
         let wake_all = AtomicBool::new(false);
-        self.queue_lock.lock_async().await;
+        let mut guard = Some(self.queue_lock.lock_async().await);
+        let expected_generation = self.generation.load(Ordering::Relaxed);
         self.wait_queue
             .wait_while_async(
-                |num_waiting| {
-                    if num_waiting == self.target - 1 {
-                        wake_all.store(true, Ordering::Relaxed);
-                        return false;
+                |_| {
+                    if let Some(num_waiting) = guard.as_mut() {
+                        **num_waiting += 1;
+                        if **num_waiting == self.target {
+                            wake_all.store(true, Ordering::Relaxed);
+                            return false;
+                        }
                     }
-                    unsafe {
-                        self.queue_lock.unlock();
-                    }
+                    // we have to drop the guard here as returning true will put this thread to sleep
+                    guard = None;
                     true
                 },
-                || true,
+                || self.generation.load(Ordering::Acquire) > expected_generation,
             )
             .await;
         if wake_all.load(Ordering::Relaxed) {
-            debug_assert!(self.queue_lock.is_locked());
-            // we know threads cannot be added to the queue while we hold the lock
-            self.wait_queue.notify_all_while(|_| true, || {});
-            unsafe {
-                self.queue_lock.unlock();
-            }
+            self.wake_all(&mut guard);
         }
+    }
+
+    fn wake_all(&self, guard: &mut Option<MutexGuard<usize>>) {
+        debug_assert!(self.queue_lock.is_locked());
+        let num_waiting = guard.as_mut().unwrap();
+        **num_waiting = 0;
+        self.generation.fetch_add(1, Ordering::Release);
+        // we know threads cannot be added to the queue while we hold the lock
+        self.wait_queue.notify_all_while(|_| true, || {});
     }
 }
 
@@ -85,6 +96,7 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
+    use tokio::select;
 
     #[test]
     fn test_barrier() {
@@ -109,6 +121,23 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         barrier_clone.wait_async().await;
         handle.await.unwrap();
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn async_test_barrier_cancel() {
+        let barrier = Arc::new(Barrier::new(2));
+        let mut timer_triggered = false;
+        select! {
+            _ = barrier.wait_async() => {
+                panic!("The barrier should not complete")
+            }
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                timer_triggered = true;
+            }
+        }
+        assert!(timer_triggered);
+        assert_eq!(barrier.wait_queue.num_waiting(), 0);
     }
 
     #[test]

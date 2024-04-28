@@ -218,7 +218,6 @@ where
         }
     }
 }
-
 impl<T> From<T> for Mutex<T> {
     fn from(value: T) -> Self {
         Self::new(value)
