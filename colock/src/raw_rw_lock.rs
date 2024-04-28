@@ -168,34 +168,14 @@ impl RawRwLock {
         }
 
         if state.shared_waiting() {
-            self.reader_queue.notify_all_while(
-                |num_left| {
-                    if num_left == 1 {
-                        self.state.fetch_and(!SHARED_WAITING, Ordering::Relaxed);
-                    }
-                    true
-                },
-                || {
-                    self.state.fetch_and(!SHARED_WAITING, Ordering::Relaxed);
-                },
-            );
+            self.notify_all_readers();
         }
     }
 
     fn exclusive_notify(&self, state: usize) {
         // writers should hand over to readers first
         if state.shared_waiting() {
-            let num_notified = self.reader_queue.notify_all_while(
-                |num_left| {
-                    if num_left == 1 {
-                        self.state.fetch_and(!SHARED_WAITING, Ordering::Relaxed);
-                    }
-                    true
-                },
-                || {
-                    self.state.fetch_and(!SHARED_WAITING, Ordering::Relaxed);
-                },
-            );
+            let num_notified = self.notify_all_readers();
             if num_notified > 0 {
                 return;
             }
@@ -254,6 +234,20 @@ impl RawRwLock {
             .wait_while_async(should_sleep, should_wake)
             .await;
         debug_assert!(self.state.load(Ordering::Relaxed).is_exclusive_locked());
+    }
+
+    fn notify_all_readers(&self) -> usize {
+        self.reader_queue.notify_all_while(
+            |num_left| {
+                if num_left == 1 {
+                    self.state.fetch_and(!SHARED_WAITING, Ordering::Relaxed);
+                }
+                true
+            },
+            || {
+                self.state.fetch_and(!SHARED_WAITING, Ordering::Relaxed);
+            },
+        )
     }
 }
 
@@ -464,17 +458,7 @@ unsafe impl lock_api::RawRwLockDowngrade for RawRwLock {
             state = new_state;
         }
         if state.shared_waiting() {
-            self.reader_queue.notify_all_while(
-                |num_left| {
-                    if num_left == 1 {
-                        self.state.fetch_and(!SHARED_WAITING, Ordering::Relaxed);
-                    }
-                    true
-                },
-                || {
-                    self.state.fetch_and(!SHARED_WAITING, Ordering::Relaxed);
-                },
-            );
+            self.notify_all_readers();
         }
     }
 }

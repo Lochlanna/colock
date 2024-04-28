@@ -109,11 +109,11 @@ where
     }
     #[inline(always)]
     pub unsafe fn force_unlock_read_fair(&self) {
-        self.inner.force_unlock_read_fair()
+        self.inner.force_unlock_read_fair();
     }
     #[inline(always)]
     pub unsafe fn force_unlock_write_fair(&self) {
-        self.inner.force_unlock_write_fair()
+        self.inner.force_unlock_write_fair();
     }
 
     #[inline(always)]

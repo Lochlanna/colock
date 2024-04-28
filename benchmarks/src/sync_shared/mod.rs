@@ -95,7 +95,7 @@ impl<T> Mutex<T> for colock::mutex::Mutex<T> {
     where
         F: FnOnce(&mut T) -> R,
     {
-        f(&mut *(self.deref().lock()))
+        f(&mut *(self.lock()))
     }
 
     fn lock_timed<F, R>(&self, f: F) -> (std::time::Duration, R)
@@ -103,7 +103,7 @@ impl<T> Mutex<T> for colock::mutex::Mutex<T> {
         F: FnOnce(&mut T) -> R,
     {
         let start = std::time::Instant::now();
-        let mut guard = self.deref().lock();
+        let mut guard = self.lock();
         let elapsed = start.elapsed();
         let res = f(&mut *guard);
         (elapsed, res)
