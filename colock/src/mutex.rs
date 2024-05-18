@@ -1,5 +1,6 @@
 use crate::raw_mutex::RawMutex;
 use std::fmt::{Debug, Formatter};
+use std::ops::Deref;
 
 pub type MutexGuard<'a, T> = lock_api::MutexGuard<'a, RawMutex, T>;
 
@@ -10,6 +11,8 @@ where
 {
     inner: lock_api::Mutex<RawMutex, T>,
 }
+
+unsafe impl<T: ?Sized> Sync for Mutex<T> {}
 
 impl<T> Debug for Mutex<T>
 where

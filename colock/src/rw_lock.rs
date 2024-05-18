@@ -16,6 +16,8 @@ where
     inner: lock_api::RwLock<RawRwLock, T>,
 }
 
+unsafe impl<T: Sized> Sync for RwLock<T> {}
+
 impl<T> Debug for RwLock<T>
 where
     T: Debug,

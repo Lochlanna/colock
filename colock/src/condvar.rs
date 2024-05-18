@@ -46,6 +46,12 @@ pub struct Condvar {
     current_mutex: AtomicPtr<RawMutex>,
 }
 
+impl Default for Condvar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Condvar {
     #[must_use]
     pub const fn new() -> Self {
@@ -106,7 +112,10 @@ impl Condvar {
         move |_| {
             let current_mutex = self
                 .current_mutex
-                .swap((mutex as *const RawMutex).cast_mut(), Ordering::Relaxed)
+                .swap(
+                    std::ptr::from_ref::<RawMutex>(mutex).cast_mut(),
+                    Ordering::Relaxed,
+                )
                 .cast_const();
             assert!(
                 current_mutex.is_null() || current_mutex == mutex,

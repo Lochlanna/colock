@@ -3,7 +3,6 @@
 use crate::Run;
 use criterion::black_box;
 use std::cell::UnsafeCell;
-use std::ops::Deref;
 use std::thread;
 use std::time::{Duration, Instant};
 
