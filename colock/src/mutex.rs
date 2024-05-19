@@ -1,6 +1,9 @@
 use crate::raw_mutex::RawMutex;
-use std::fmt::{Debug, Formatter};
-use std::ops::Deref;
+use core::cell::Cell;
+use core::fmt::{Debug, Formatter};
+use core::ops::{Deref, DerefMut};
+use core::pin::Pin;
+use core::task::{Context, Poll};
 
 pub type MutexGuard<'a, T> = lock_api::MutexGuard<'a, RawMutex, T>;
 
@@ -11,8 +14,6 @@ where
 {
     inner: lock_api::Mutex<RawMutex, T>,
 }
-
-unsafe impl<T: ?Sized> Sync for Mutex<T> {}
 
 impl<T> Debug for Mutex<T>
 where
@@ -178,7 +179,12 @@ where
     pub fn try_lock_until(&self, timeout: std::time::Instant) -> Option<MutexGuard<'_, T>> {
         self.inner.try_lock_until(timeout)
     }
+}
 
+impl<T> Mutex<T>
+where
+    T: ?Sized,
+{
     /// Asynchronously acquires the lock.
     ///
     /// If the lock is already held, the current task will be queued and awoken when the lock is
@@ -211,16 +217,57 @@ where
     ///# });
     /// ```
     #[inline]
-    pub async fn lock_async(&self) -> MutexGuard<'_, T> {
+    // pub async fn lock_async(&self) -> MutexGuard<'_, T> {
+    //     if let Some(guard) = self.inner.try_lock() {
+    //         return guard;
+    //     }
+    //     unsafe {
+    //         self.inner.raw().lock_async().await;
+    //         self.inner.make_guard_unchecked()
+    //     }
+    // }
+
+    pub fn lock_async(&self) -> impl core::future::Future<Output = MutexGuard<'_, T>> + Send {
         if let Some(guard) = self.inner.try_lock() {
-            return guard;
+            return AsyncLockFut::Complete(Cell::new(Some(guard)));
         }
-        unsafe {
-            self.inner.raw().lock_async().await;
-            self.inner.make_guard_unchecked()
+        let make_guard = || unsafe { self.inner.make_guard_unchecked() };
+        unsafe { AsyncLockFut::Pending(self.inner.raw().lock_async(), make_guard) }
+    }
+}
+
+pub enum AsyncLockFut<'a, T, F, G>
+where
+    T: ?Sized,
+{
+    Complete(Cell<Option<MutexGuard<'a, T>>>),
+    Pending(F, G),
+}
+
+unsafe impl<'a, T, F, G> Send for AsyncLockFut<'a, T, F, G> where T: ?Sized {}
+
+impl<'a, T, F, G> core::future::Future for AsyncLockFut<'a, T, F, G>
+where
+    T: ?Sized,
+    F: core::future::Future<Output = ()>,
+    G: Fn() -> MutexGuard<'a, T>,
+{
+    type Output = MutexGuard<'a, T>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = unsafe { self.get_unchecked_mut() };
+        match this {
+            AsyncLockFut::Complete(guard) => {
+                Poll::Ready(guard.replace(None).expect("guard was None"))
+            }
+            AsyncLockFut::Pending(fut, mg) => {
+                let fut = unsafe { Pin::new_unchecked(fut) };
+                fut.poll(cx).map(|_| mg())
+            }
         }
     }
 }
+
 impl<T> From<T> for Mutex<T> {
     fn from(value: T) -> Self {
         Self::new(value)
