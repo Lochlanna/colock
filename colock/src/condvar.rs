@@ -240,7 +240,7 @@ impl Condvar {
 #[cfg(test)]
 mod my_tests {
     use super::*;
-    use crate::mutex::Mutex;
+    use crate::mutex::{AsyncMutex, Mutex};
     use std::sync::Arc;
 
     #[test]
