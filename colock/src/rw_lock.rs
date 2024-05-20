@@ -2,161 +2,27 @@
 
 use crate::raw_rw_lock::RawRwLock;
 use lock_api;
-use std::fmt::{Debug, Formatter};
+use std::future::Future;
 
 pub type RwLockReadGuard<'a, T> = lock_api::RwLockReadGuard<'a, RawRwLock, T>;
 pub type RwLockUpgradableReadGuard<'a, T> = lock_api::RwLockUpgradableReadGuard<'a, RawRwLock, T>;
 pub type RwLockWriteGuard<'a, T> = lock_api::RwLockWriteGuard<'a, RawRwLock, T>;
+pub type RwLock<T> = lock_api::RwLock<RawRwLock, T>;
 
-#[derive(Default)]
-pub struct RwLock<T>
-where
-    T: ?Sized,
-{
-    inner: lock_api::RwLock<RawRwLock, T>,
+pub trait AsyncRwLock {
+    type InnerType: ?Sized;
+
+    fn read_async(&self) -> impl Future<Output = RwLockReadGuard<'_, Self::InnerType>>;
+    fn write_async(&self) -> impl Future<Output = RwLockWriteGuard<'_, Self::InnerType>>;
 }
 
-unsafe impl<T: Sized> Sync for RwLock<T> {}
-
-impl<T> Debug for RwLock<T>
+impl<T> AsyncRwLock for RwLock<T>
 where
-    T: Debug,
+    T: ?Sized + Send + Sync,
 {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        self.inner.fmt(f)
-    }
-}
+    type InnerType = T;
 
-impl<T> RwLock<T> {
-    pub const fn new(val: T) -> Self {
-        Self {
-            inner: lock_api::RwLock::<RawRwLock, T>::const_new(RawRwLock::new(), val),
-        }
-    }
-
-    pub const fn const_new(val: T) -> Self {
-        Self::new(val)
-    }
-
-    #[inline(always)]
-    pub fn into_inner(self) -> T {
-        self.inner.into_inner()
-    }
-}
-
-impl<T> RwLock<T>
-where
-    T: ?Sized,
-{
-    #[inline(always)]
-    pub unsafe fn make_read_guard_unchecked(&self) -> RwLockReadGuard<'_, T> {
-        self.inner.make_read_guard_unchecked()
-    }
-
-    #[inline(always)]
-    pub unsafe fn make_write_guard_unchecked(&self) -> RwLockWriteGuard<'_, T> {
-        self.inner.make_write_guard_unchecked()
-    }
-
-    #[inline(always)]
-    pub fn read(&self) -> RwLockReadGuard<'_, T> {
-        self.inner.read()
-    }
-
-    #[inline(always)]
-    pub fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
-        self.inner.try_read()
-    }
-
-    #[inline(always)]
-    pub fn write(&self) -> RwLockWriteGuard<'_, T> {
-        self.inner.write()
-    }
-
-    #[inline(always)]
-    pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
-        self.inner.try_write()
-    }
-
-    #[inline(always)]
-    pub fn get_mut(&mut self) -> &mut T {
-        self.inner.get_mut()
-    }
-
-    #[inline(always)]
-    pub fn is_locked(&self) -> bool {
-        self.inner.is_locked()
-    }
-
-    #[inline(always)]
-    pub fn is_locked_exclusive(&self) -> bool {
-        self.inner.is_locked_exclusive()
-    }
-
-    #[inline(always)]
-    pub unsafe fn force_unlock_read(&self) {
-        self.inner.force_unlock_read();
-    }
-    #[inline(always)]
-    pub unsafe fn force_unlock_write(&self) {
-        self.inner.force_unlock_write();
-    }
-    #[inline(always)]
-    pub unsafe fn raw(&self) -> &RawRwLock {
-        self.inner.raw()
-    }
-    #[inline(always)]
-    pub fn data_ptr(&self) -> *mut T {
-        self.inner.data_ptr()
-    }
-    #[inline(always)]
-    pub unsafe fn force_unlock_read_fair(&self) {
-        self.inner.force_unlock_read_fair();
-    }
-    #[inline(always)]
-    pub unsafe fn force_unlock_write_fair(&self) {
-        self.inner.force_unlock_write_fair();
-    }
-
-    #[inline(always)]
-    pub fn try_read_for(&self, timeout: std::time::Duration) -> Option<RwLockReadGuard<'_, T>> {
-        self.inner.try_read_for(timeout)
-    }
-
-    #[inline(always)]
-    pub fn try_read_until(&self, timeout: std::time::Instant) -> Option<RwLockReadGuard<'_, T>> {
-        self.inner.try_read_until(timeout)
-    }
-
-    #[inline(always)]
-    pub fn try_write_for(&self, timeout: std::time::Duration) -> Option<RwLockWriteGuard<'_, T>> {
-        self.inner.try_write_for(timeout)
-    }
-
-    #[inline(always)]
-    pub fn try_write_until(&self, timeout: std::time::Instant) -> Option<RwLockWriteGuard<'_, T>> {
-        self.inner.try_write_until(timeout)
-    }
-    #[inline(always)]
-    pub unsafe fn make_upgradable_guard_unchecked(&self) -> RwLockUpgradableReadGuard<'_, T> {
-        self.inner.make_upgradable_guard_unchecked()
-    }
-    #[inline(always)]
-    pub fn upgradable_read(&self) -> RwLockUpgradableReadGuard<'_, T> {
-        self.inner.upgradable_read()
-    }
-
-    #[inline(always)]
-    pub fn try_upgradable_read(&self) -> Option<RwLockUpgradableReadGuard<'_, T>> {
-        self.inner.try_upgradable_read()
-    }
-}
-
-impl<T> RwLock<T>
-where
-    T: ?Sized,
-{
-    pub async fn read_async(&self) -> RwLockReadGuard<'_, T> {
+    async fn read_async(&self) -> RwLockReadGuard<'_, Self::InnerType> {
         if let Some(guard) = self.try_read() {
             return guard;
         }
@@ -166,7 +32,7 @@ where
         }
     }
 
-    pub async fn write_async(&self) -> RwLockWriteGuard<'_, T> {
+    async fn write_async(&self) -> RwLockWriteGuard<'_, Self::InnerType> {
         if let Some(guard) = self.try_write() {
             return guard;
         }

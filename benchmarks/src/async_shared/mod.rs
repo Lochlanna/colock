@@ -75,7 +75,7 @@ where
 #[async_trait]
 impl<T> Mutex<T> for colock::mutex::Mutex<T>
 where
-    T: Send,
+    T: Send + Sync,
 {
     fn new(v: T) -> Self {
         Self::new(v)

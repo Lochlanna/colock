@@ -8,9 +8,6 @@
 
 mod thread_parker;
 
-#[cfg(not(loom))]
-mod loom;
-
 pub use thread_parker::thread_yield;
 pub use thread_parker::{ThreadParker, ThreadParkerT};
 
@@ -22,33 +19,29 @@ mod tests {
 
     #[test]
     fn park_timeout() {
-        loom::model(|| {
-            let sleep_time = Duration::from_millis(5);
-            let parker = ThreadParker::const_new();
-            unsafe {
-                parker.prepare_park();
-            }
-            let start = Instant::now();
-            let was_woken = unsafe { parker.park_until(Instant::now() + sleep_time) };
-            assert!(!was_woken);
-            let elapsed = start.elapsed();
-            assert!(elapsed >= sleep_time);
-        });
+        let sleep_time = Duration::from_millis(5);
+        let parker = ThreadParker::const_new();
+        unsafe {
+            parker.prepare_park();
+        }
+        let start = Instant::now();
+        let was_woken = unsafe { parker.park_until(Instant::now() + sleep_time) };
+        assert!(!was_woken);
+        let elapsed = start.elapsed();
+        assert!(elapsed >= sleep_time);
     }
 
     #[test]
     fn park_wake() {
-        loom::model(|| {
-            const SLEEP_TIME: Duration = Duration::from_millis(50);
-            let parker = ThreadParker::const_new();
-            unsafe {
-                parker.prepare_park();
-            }
-            let start = Instant::now();
-            let was_woken = unsafe { parker.park_until(Instant::now() + SLEEP_TIME) };
-            assert!(!was_woken);
-            let elapsed = start.elapsed();
-            assert!(elapsed >= SLEEP_TIME);
-        });
+        const SLEEP_TIME: Duration = Duration::from_millis(50);
+        let parker = ThreadParker::const_new();
+        unsafe {
+            parker.prepare_park();
+        }
+        let start = Instant::now();
+        let was_woken = unsafe { parker.park_until(Instant::now() + SLEEP_TIME) };
+        assert!(!was_woken);
+        let elapsed = start.elapsed();
+        assert!(elapsed >= SLEEP_TIME);
     }
 }

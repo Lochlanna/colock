@@ -1,22 +1,16 @@
 use crate::raw_mutex::RawMutex;
-use core::cell::Cell;
-use core::fmt::{Debug, Formatter};
-use core::ops::{Deref, DerefMut};
-use core::pin::Pin;
-use core::task::{Context, Poll};
+use std::future::Future;
 
 pub type MutexGuard<'a, T> = lock_api::MutexGuard<'a, RawMutex, T>;
 pub type Mutex<T> = lock_api::Mutex<RawMutex, T>;
 
 pub trait AsyncMutex {
     type InnerType: ?Sized;
-    fn lock_async(
-        &self,
-    ) -> impl core::future::Future<Output = MutexGuard<'_, Self::InnerType>> + Send;
+    fn lock_async(&self) -> impl Future<Output = MutexGuard<'_, Self::InnerType>>;
 }
 impl<T> AsyncMutex for Mutex<T>
 where
-    T: ?Sized,
+    T: ?Sized + Send + Sync,
 {
     type InnerType = T;
 
@@ -54,43 +48,13 @@ where
     ///# });
     /// ```
 
-    fn lock_async(&self) -> impl core::future::Future<Output = MutexGuard<'_, T>> + Send {
+    async fn lock_async(&self) -> MutexGuard<'_, T> {
         if let Some(guard) = self.try_lock() {
-            return AsyncLockFut::Complete(Cell::new(Some(guard)));
+            return guard;
         }
-        let make_guard = || unsafe { self.make_guard_unchecked() };
-        unsafe { AsyncLockFut::Pending(self.raw().lock_async(), make_guard) }
-    }
-}
-
-pub enum AsyncLockFut<'a, T, F, G>
-where
-    T: ?Sized,
-{
-    Complete(Cell<Option<MutexGuard<'a, T>>>),
-    Pending(F, G),
-}
-
-unsafe impl<'a, T, F, G> Send for AsyncLockFut<'a, T, F, G> where T: ?Sized {}
-
-impl<'a, T, F, G> core::future::Future for AsyncLockFut<'a, T, F, G>
-where
-    T: ?Sized,
-    F: core::future::Future<Output = ()>,
-    G: Fn() -> MutexGuard<'a, T>,
-{
-    type Output = MutexGuard<'a, T>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = unsafe { self.get_unchecked_mut() };
-        match this {
-            AsyncLockFut::Complete(guard) => {
-                Poll::Ready(guard.replace(None).expect("guard was None"))
-            }
-            AsyncLockFut::Pending(fut, mg) => {
-                let fut = unsafe { Pin::new_unchecked(fut) };
-                fut.poll(cx).map(|_| mg())
-            }
+        unsafe {
+            self.raw().lock_async().await;
+            self.make_guard_unchecked()
         }
     }
 }

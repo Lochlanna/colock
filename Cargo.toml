@@ -7,7 +7,6 @@ members = [
     "intrusive_list",
     "event",
     "colock",
-    "dev_utils"
 ]
 
 [profile.bench]
