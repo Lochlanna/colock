@@ -12,41 +12,46 @@ use core::cell::Cell;
 use core::pin::{pin, Pin};
 use core::task::{Context, Poll};
 use handle::{AsyncHandle, Handle, ThreadHandle, Wakeable};
-use intrusive_list::{HasNode, IntrusiveLinkedList, ListToken, NodeData};
+use intrusive_list::{ConcurrentIntrusiveLinkedList, HasNode, ListToken, Node};
 use maybe_ref::MaybeRef;
 use parking::{ThreadParker, ThreadParkerT};
 use std::fmt::Debug;
 use std::time::Instant;
 
 #[derive(Debug)]
-struct IntrusiveNode<T> {
-    node_data: NodeData<Self>,
+struct TokenData<T>
+where
+    T: Send,
+{
     handle: MaybeRef<'static, Handle>,
     metadata: T,
 }
 
-impl<T> HasNode<Self> for IntrusiveNode<T> {
-    fn get_node(&self) -> &NodeData<Self> {
-        &self.node_data
-    }
-}
-
 #[derive(Debug)]
-pub struct TaggedEvent<T> {
-    queue: IntrusiveLinkedList<IntrusiveNode<T>>,
+pub struct TaggedEvent<T>
+where
+    T: Send,
+{
+    queue: ConcurrentIntrusiveLinkedList<TokenData<T>>,
 }
 
-impl<T> Default for TaggedEvent<T> {
+impl<T> Default for TaggedEvent<T>
+where
+    T: Send,
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> TaggedEvent<T> {
+impl<T> TaggedEvent<T>
+where
+    T: Send,
+{
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            queue: IntrusiveLinkedList::new(),
+            queue: ConcurrentIntrusiveLinkedList::new(),
         }
     }
     fn notify_one(&self) -> bool {
@@ -123,11 +128,10 @@ impl<T> TaggedEvent<T> {
         W: FnMut() -> bool + Send,
     {
         let handle = Handle::Async(Cell::new(None));
-        let node = IntrusiveNode {
-            node_data: NodeData::new(),
+        let node = Node::new(TokenData {
             handle: MaybeRef::Owned(handle),
             metadata,
-        };
+        });
         Poller {
             event: self,
             will_sleep,
@@ -143,15 +147,14 @@ impl<T> TaggedEvent<T> {
 
     fn with_thread_token<R>(
         &self,
-        f: impl FnOnce(&Pin<&mut ListToken<IntrusiveNode<T>>>) -> R,
+        f: impl FnOnce(&Pin<&mut ListToken<TokenData<T>>>) -> R,
         metadata: T,
     ) -> R {
         if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
-            let node = IntrusiveNode {
-                node_data: NodeData::new(),
+            let node = Node::new(TokenData {
                 handle: MaybeRef::Owned(Handle::Sync(ThreadParker::const_new())),
                 metadata,
-            };
+            });
             let token = pin!(self.queue.build_token(node));
             return f(&token);
         }
@@ -161,11 +164,10 @@ impl<T> TaggedEvent<T> {
         }
         HANDLE.with(|handle| {
             let handle: &'static Handle = unsafe { core::mem::transmute(handle) };
-            let node = IntrusiveNode {
-                node_data: NodeData::new(),
+            let node = Node::new(TokenData {
                 handle: MaybeRef::Ref(handle),
                 metadata,
-            };
+            });
             let token = pin!(self.queue.build_token(node));
             f(&token)
         })
@@ -288,26 +290,20 @@ pub struct Poller<'a, T, S, W>
 where
     S: FnMut(usize) -> bool + Send,
     W: FnMut() -> bool + Send,
+    T: Send,
 {
     event: &'a TaggedEvent<T>,
     will_sleep: S,
     should_wake: W,
-    list_token: ListToken<'a, IntrusiveNode<T>>,
+    list_token: ListToken<'a, TokenData<T>>,
     token_on_queue: bool,
-}
-
-unsafe impl<T, S, W> Send for Poller<'_, T, S, W>
-where
-    S: FnMut(usize) -> bool + Send,
-    W: FnMut() -> bool + Send,
-    T: Send,
-{
 }
 
 impl<T, S, W> Drop for Poller<'_, T, S, W>
 where
     S: FnMut(usize) -> bool + Send,
     W: FnMut() -> bool + Send,
+    T: Send,
 {
     fn drop(&mut self) {
         unsafe {
@@ -325,6 +321,7 @@ impl<T, S, W> core::future::Future for Poller<'_, T, S, W>
 where
     S: FnMut(usize) -> bool + Send,
     W: FnMut() -> bool + Send,
+    T: Send,
 {
     type Output = ();
 

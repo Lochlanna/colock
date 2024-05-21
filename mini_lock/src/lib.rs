@@ -65,7 +65,7 @@ impl<T> Debug for MiniLock<T> {
 }
 
 // SAFETY: MiniLock provides the synchronization needed to access the data
-unsafe impl<T> Sync for MiniLock<T> {}
+unsafe impl<T> Sync for MiniLock<T> where T: Send {}
 
 // SAFETY: MiniLock is safe to send as long as the data is safe to send
 unsafe impl<T> Send for MiniLock<T> where T: Send {}

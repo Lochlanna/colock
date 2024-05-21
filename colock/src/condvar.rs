@@ -3,13 +3,12 @@ use crate::raw_mutex::RawMutex;
 use event::Event;
 use lock_api::RawMutex as LockApiRawMutex;
 use std::cell::Cell;
-use std::ops::Deref;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
 
 /// A type indicating whether a timed wait on a condition variable returned
-/// due to a time out or not.
+/// due to a time-out or not.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub struct WaitTimeoutResult(bool);
 
@@ -22,21 +21,28 @@ impl WaitTimeoutResult {
     }
 }
 
-#[derive(Debug, Default)]
-struct UnlockFlag(Cell<bool>);
+trait MaybeAtomic<T> {
+    fn store(&self, value: T, ordering: Ordering);
+    fn load(&self, ordering: Ordering) -> T;
+}
 
-unsafe impl Sync for UnlockFlag {}
+impl MaybeAtomic<bool> for AtomicBool {
+    fn store(&self, value: bool, ordering: Ordering) {
+        Self::store(self, value, ordering);
+    }
 
-impl Deref for UnlockFlag {
-    type Target = Cell<bool>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+    fn load(&self, ordering: Ordering) -> bool {
+        Self::load(self, ordering)
     }
 }
-impl UnlockFlag {
-    const fn new() -> Self {
-        Self(Cell::new(false))
+
+impl MaybeAtomic<bool> for Cell<bool> {
+    fn store(&self, value: bool, _: Ordering) {
+        self.set(value);
+    }
+
+    fn load(&self, _: Ordering) -> bool {
+        self.get()
     }
 }
 
@@ -104,11 +110,14 @@ impl Condvar {
         )
     }
 
-    const fn will_sleep<'a>(
+    const fn will_sleep<'a, MAB>(
         &'a self,
         mutex: &'a RawMutex,
-        did_unlock: &'a UnlockFlag,
-    ) -> impl Fn(usize) -> bool + 'a {
+        did_unlock: &'a MAB,
+    ) -> impl Fn(usize) -> bool + 'a
+    where
+        MAB: MaybeAtomic<bool>,
+    {
         move |_| {
             let current_mutex = self
                 .current_mutex
@@ -125,7 +134,7 @@ impl Condvar {
             unsafe {
                 mutex.unlock();
             }
-            did_unlock.set(true);
+            did_unlock.store(true, Ordering::Relaxed);
             true
         }
     }
@@ -133,7 +142,7 @@ impl Condvar {
     pub fn wait<T: ?Sized>(&self, guard: &mut MutexGuard<'_, T>) {
         let mutex = unsafe { MutexGuard::mutex(guard).raw() };
         debug_assert!(mutex.is_locked());
-        let did_unlock = UnlockFlag::new();
+        let did_unlock = Cell::new(false);
         self.wait_queue
             .wait_once(self.will_sleep(mutex, &did_unlock));
         if did_unlock.get() {
@@ -148,7 +157,7 @@ impl Condvar {
     ) -> WaitTimeoutResult {
         let mutex = unsafe { MutexGuard::mutex(guard).raw() };
         debug_assert!(mutex.is_locked());
-        let did_unlock = UnlockFlag::new();
+        let did_unlock = Cell::new(false);
         let result = !self.wait_queue.wait_while_until(
             self.will_sleep(mutex, &did_unlock),
             || true,
@@ -180,7 +189,7 @@ impl Condvar {
         let mutex = unsafe { MutexGuard::mutex(guard).raw() };
         while condition(&mut *guard) {
             debug_assert!(mutex.is_locked());
-            let did_unlock = UnlockFlag::new();
+            let did_unlock = Cell::new(false);
             self.wait_queue
                 .wait_once(self.will_sleep(mutex, &did_unlock));
             if did_unlock.get() {
@@ -198,7 +207,7 @@ impl Condvar {
         let mutex = unsafe { MutexGuard::mutex(guard).raw() };
         while condition(&mut *guard) {
             debug_assert!(mutex.is_locked());
-            let did_unlock = UnlockFlag::new();
+            let did_unlock = Cell::new(false);
             let result = !self.wait_queue.wait_while_until(
                 self.will_sleep(mutex, &did_unlock),
                 || true,
@@ -224,14 +233,14 @@ impl Condvar {
         self.wait_while_until(guard, condition, timeout)
     }
 
-    pub async fn async_wait<T: ?Sized>(&self, guard: &mut MutexGuard<'_, T>) {
+    pub async fn async_wait<T: ?Sized + Send>(&self, guard: &mut MutexGuard<'_, T>) {
         let mutex = unsafe { MutexGuard::mutex(guard).raw() };
         debug_assert!(mutex.is_locked());
-        let did_unlock = UnlockFlag::new();
+        let did_unlock = AtomicBool::new(false);
         self.wait_queue
             .wait_while_async(self.will_sleep(mutex, &did_unlock), || true)
             .await;
-        if did_unlock.get() {
+        if did_unlock.load(Ordering::Relaxed) {
             mutex.lock_async().await;
         }
     }
@@ -316,7 +325,7 @@ mod tests {
             let data = data.clone();
             let tx = tx.clone();
             thread::spawn(move || {
-                let &(ref lock, ref cond) = &*data;
+                let (lock, cond) = &*data;
                 let mut cnt = lock.lock();
                 *cnt += 1;
                 if *cnt == N {
@@ -330,7 +339,7 @@ mod tests {
         }
         drop(tx);
 
-        let &(ref lock, ref cond) = &*data;
+        let (lock, cond) = &*data;
         rx.recv().unwrap();
         let mut cnt = lock.lock();
         *cnt = 0;
@@ -378,7 +387,7 @@ mod tests {
             let data = data.clone();
             let tx = tx.clone();
             thread::spawn(move || {
-                let &(ref lock, ref cond) = &*data;
+                let (lock, cond) = &*data;
                 let mut cnt = lock.lock();
                 *cnt += 1;
                 if *cnt == N {
@@ -392,7 +401,7 @@ mod tests {
         }
         drop(tx);
 
-        let &(ref lock, ref cond) = &*data;
+        let (lock, cond) = &*data;
         rx.recv().unwrap();
         let mut cnt = lock.lock();
         *cnt = 0;
@@ -421,7 +430,7 @@ mod tests {
             let _g = m2.lock();
             c2.notify_one();
         });
-        let timeout_res = c.wait_for(&mut g, Duration::from_secs(u64::max_value()));
+        let timeout_res = c.wait_for(&mut g, Duration::from_secs(u64::MAX));
         assert!(!timeout_res.timed_out());
 
         drop(g);
@@ -500,7 +509,7 @@ mod tests {
         let mut mutex_guard = mutex.lock();
         cv.wait_while(&mut mutex_guard, condition);
 
-        assert!(*mutex_guard == 1);
+        assert_eq!(*mutex_guard, 1);
     }
 
     #[test]
@@ -521,7 +530,7 @@ mod tests {
         let timeout_result = cv.wait_while_until(&mut mutex_guard, condition, timeout);
 
         assert!(timeout_result.timed_out());
-        assert!(*mutex_guard == num_iters + 1);
+        assert_eq!(*mutex_guard, num_iters + 1);
 
         // prevent deadlock with notifier
         drop(mutex_guard);
@@ -545,16 +554,16 @@ mod tests {
 
         cv.wait_while(&mut mutex_guard, condition);
 
-        assert!(*mutex_guard == num_iters + 1);
+        assert_eq!(*mutex_guard, num_iters + 1);
 
         cv.wait_while(&mut mutex_guard, condition);
         handle.join().unwrap();
 
-        assert!(*mutex_guard == num_iters + 2);
+        assert_eq!(*mutex_guard, num_iters + 2);
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Condvar wait called with two different mutexes")]
     fn two_mutexes() {
         // Make sure we don't leave the child thread dangling
         struct PanicGuard<'a>(&'a Condvar);
@@ -622,7 +631,7 @@ mod tests {
             // (At least Miri needs this, because it doesn't preempt threads.)
             thread::yield_now();
         }
-        // The thread should have been requeued to the mutex, which we wake up now.
+        // The thread should have been requested to the mutex, which we wake up now.
         drop(g);
         t.join().unwrap();
     }
@@ -645,7 +654,7 @@ mod tests {
             });
         }
 
-        thread::sleep(Duration::from_millis(100));
+        sleep(Duration::from_millis(100));
         locks.1.notify_one();
 
         for _ in 0..4 {
@@ -655,7 +664,7 @@ mod tests {
 }
 
 /// This module contains an integration test that is heavily inspired from WebKit's own integration
-/// tests for it's own Condvar.
+/// tests for its own Condvar.
 #[cfg(test)]
 mod webkit_queue_test {
     use crate::{condvar::Condvar, mutex::Mutex, mutex::MutexGuard};
@@ -807,7 +816,7 @@ mod webkit_queue_test {
                 }
                 let should_notify = queue.items.len() == max_queue_size;
                 let result = queue.items.pop_front();
-                std::mem::drop(queue);
+                drop(queue);
                 (should_notify, result)
             };
             notify(notify_style, &full_condition, should_notify);
@@ -839,7 +848,7 @@ mod webkit_queue_test {
                     );
                     let should_notify = queue.items.is_empty();
                     queue.items.push_back(message);
-                    std::mem::drop(queue);
+                    drop(queue);
                     should_notify
                 };
                 notify(notify_style, &empty_condition, should_notify);
