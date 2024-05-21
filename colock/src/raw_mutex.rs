@@ -14,6 +14,12 @@ pub struct RawMutex {
     state: AtomicU8,
 }
 
+impl Default for RawMutex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RawMutex {
     #[must_use]
     pub const fn new() -> Self {
@@ -29,17 +35,25 @@ impl RawMutex {
         &self.queue
     }
 
+    fn attempt_lock(&self, state: &mut u8) -> bool {
+        match self.state.compare_exchange_weak(
+            *state,
+            *state | LOCKED_BIT,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => true,
+            Err(new_state) => {
+                *state = new_state;
+                false
+            }
+        }
+    }
+
     #[inline]
     fn try_lock_once(&self, state: &mut u8) -> bool {
         while *state & LOCKED_BIT == 0 {
-            if let Err(new_state) = self.state.compare_exchange_weak(
-                *state,
-                *state | LOCKED_BIT,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
-                *state = new_state;
-            } else {
+            if self.attempt_lock(state) {
                 return true;
             }
         }
@@ -51,14 +65,7 @@ impl RawMutex {
         let mut spin_wait = spinwait::SpinWait::<4, 7>::new();
         while spin_wait.spin() {
             if *state & LOCKED_BIT == 0 {
-                if let Err(new_state) = self.state.compare_exchange_weak(
-                    *state,
-                    *state | LOCKED_BIT,
-                    Ordering::Acquire,
-                    Ordering::Relaxed,
-                ) {
-                    *state = new_state;
-                } else {
+                if self.attempt_lock(state) {
                     return true;
                 }
             } else {
@@ -387,10 +394,10 @@ mod tests {
         let start = Instant::now();
         let did_lock;
         tokio::select! {
-            _ = mutex.lock_async() => {
+            () = mutex.lock_async() => {
                 did_lock = true;
             }
-            _ = tokio::time::sleep(Duration::from_millis(150)) => {
+            () = tokio::time::sleep(Duration::from_millis(150)) => {
                 did_lock = false;
             }
         }
