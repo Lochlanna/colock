@@ -49,9 +49,6 @@ where
     /// ```
 
     async fn lock_async(&self) -> MutexGuard<'_, T> {
-        if let Some(guard) = self.try_lock() {
-            return guard;
-        }
         unsafe {
             self.raw().lock_async().await;
             self.make_guard_unchecked()

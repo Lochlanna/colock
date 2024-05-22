@@ -23,9 +23,6 @@ where
     type InnerType = T;
 
     async fn read_async(&self) -> RwLockReadGuard<'_, Self::InnerType> {
-        if let Some(guard) = self.try_read() {
-            return guard;
-        }
         unsafe {
             self.raw().lock_shared_async().await;
             self.make_read_guard_unchecked()
@@ -33,9 +30,6 @@ where
     }
 
     async fn write_async(&self) -> RwLockWriteGuard<'_, Self::InnerType> {
-        if let Some(guard) = self.try_write() {
-            return guard;
-        }
         unsafe {
             self.raw().lock_exclusive_async().await;
             self.make_write_guard_unchecked()

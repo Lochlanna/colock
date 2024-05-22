@@ -20,6 +20,7 @@ use spinwait::SpinWait;
 use std::cell::UnsafeCell;
 use std::fmt::Debug;
 use std::ops::{Deref, DerefMut};
+use std::ptr;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
@@ -95,7 +96,7 @@ impl<T> MiniLock<T> {
         loop {
             node.next
                 .store((head & PTR_MASK) as *mut Node, Ordering::Relaxed);
-            let target = node as *const _ as usize | (head & LOCKED_BIT);
+            let target = ptr::from_ref(node) as usize | (head & LOCKED_BIT);
             if let Err(new_head) =
                 self.head
                     .compare_exchange_weak(head, target, Ordering::Release, Ordering::Relaxed)
