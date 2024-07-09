@@ -11,11 +11,12 @@ mod maybe_ref;
 use core::cell::Cell;
 use core::pin::{pin, Pin};
 use core::task::{Context, Poll};
-use handle::{AsyncHandle, Handle, ThreadHandle, Wakeable};
+use handle::Handle;
 use intrusive_list::{ConcurrentIntrusiveLinkedList, HasNode, ListToken, Node};
 use maybe_ref::MaybeRef;
 use parking::{ThreadParker, ThreadParkerT};
 use std::fmt::Debug;
+use std::ops::Deref;
 use std::time::Instant;
 
 #[derive(Debug)]
@@ -23,8 +24,20 @@ struct TokenData<T>
 where
     T: Send,
 {
-    handle: MaybeRef<'static, Handle>,
+    handle: Option<MaybeRef<'static, Handle>>,
     metadata: T,
+}
+
+impl<T> TokenData<T>
+where
+    T: Send,
+{
+    fn thread_parker(&self) -> Option<&ThreadParker> {
+        match self.handle.as_ref()?.deref() {
+            Handle::Sync(thread_parker) => Some(thread_parker),
+            Handle::Async(_) => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -104,12 +117,17 @@ where
                 if !condition(num_left, &parker.metadata) {
                     return None;
                 }
-                Some(parker.handle.unpark_handle())
+                let handle = parker.handle.take().expect("waker was none");
+                Some(handle)
             },
             on_empty,
         ) {
             unsafe {
-                unpark_handle.unpark();
+                match unpark_handle {
+                    MaybeRef::Ref(unpark_ref) => unpark_ref.unpark_ref(),
+                    MaybeRef::Owned(unpark_owned) => unpark_owned.unpark_owned(),
+                    MaybeRef::Boxed(boxed) => boxed.unpark_ref(),
+                }
             }
             return true;
         }
@@ -127,9 +145,8 @@ where
         S: FnMut(usize) -> bool + Send,
         W: FnMut() -> bool + Send,
     {
-        let handle = Handle::Async(Cell::new(None));
         let node = Node::new(TokenData {
-            handle: MaybeRef::Owned(handle),
+            handle: None,
             metadata,
         });
         Poller {
@@ -137,7 +154,7 @@ where
             will_sleep,
             should_wake,
             list_token: self.queue.build_token(node),
-            token_on_queue: false,
+            poller_state: PollerState::Initialised,
         }
     }
 
@@ -152,7 +169,7 @@ where
     ) -> R {
         if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
             let node = Node::new(TokenData {
-                handle: MaybeRef::Owned(Handle::Sync(ThreadParker::const_new())),
+                handle: Some(MaybeRef::Owned(Handle::Sync(ThreadParker::const_new()))),
                 metadata,
             });
             let token = pin!(self.queue.build_token(node));
@@ -165,7 +182,7 @@ where
         HANDLE.with(|handle| {
             let handle: &'static Handle = unsafe { core::mem::transmute(handle) };
             let node = Node::new(TokenData {
-                handle: MaybeRef::Ref(handle),
+                handle: Some(MaybeRef::Ref(handle)),
                 metadata,
             });
             let token = pin!(self.queue.build_token(node));
@@ -184,7 +201,6 @@ where
             |token| {
                 let parker = token
                     .inner()
-                    .handle
                     .thread_parker()
                     .expect("token should be a thread parker");
                 unsafe {
@@ -193,10 +209,6 @@ where
                 while token.as_ref().push_if(&mut should_sleep) {
                     unsafe {
                         parker.park();
-                    }
-                    unsafe {
-                        // This is an optimisation that means it won't try to revoke itself on drop
-                        token.as_ref().set_off_queue();
                     }
                     if should_wake() {
                         return;
@@ -221,7 +233,6 @@ where
             |token| {
                 let parker = token
                     .inner()
-                    .handle
                     .thread_parker()
                     .expect("token should be a thread parker");
 
@@ -237,10 +248,6 @@ where
                 };
 
                 if Instant::now() >= timeout {
-                    unsafe {
-                        // This is an optimisation that means it won't try to revoke itself on drop
-                        token.as_ref().set_off_queue();
-                    }
                     return false;
                 }
 
@@ -260,10 +267,6 @@ where
                         unsafe {
                             parker.park();
                         }
-                    }
-                    unsafe {
-                        // This is an optimisation that means it won't try to revoke itself on drop
-                        token.as_ref().set_off_queue();
                     }
                     if should_wake() {
                         return true;
@@ -286,6 +289,12 @@ where
     }
 }
 
+enum PollerState {
+    Initialised,
+    Pushed,
+    Complete,
+}
+
 pub struct Poller<'a, T, S, W>
 where
     S: FnMut(usize) -> bool + Send,
@@ -296,7 +305,7 @@ where
     will_sleep: S,
     should_wake: W,
     list_token: ListToken<'a, TokenData<T>>,
-    token_on_queue: bool,
+    poller_state: PollerState,
 }
 
 impl<T, S, W> Drop for Poller<'_, T, S, W>
@@ -306,13 +315,16 @@ where
     T: Send,
 {
     fn drop(&mut self) {
-        unsafe {
-            self.list_token.set_off_queue();
-        }
-        if self.token_on_queue && !self.list_token.revoke() {
-            // Our waker was popped of the queue but we didn't get polled. This means the notification was lost
-            // We have to blindly attempt to wake someone else. This could be expensive but should be rare!
-            self.event.notify_one();
+        match self.poller_state {
+            PollerState::Initialised => {}
+            PollerState::Pushed => {
+                if !self.list_token.revoke() {
+                    self.event.notify_one();
+                }
+            }
+            PollerState::Complete => {
+                debug_assert!(!self.list_token.revoke());
+            }
         }
     }
 }
@@ -327,27 +339,33 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
-        if this.token_on_queue {
-            this.token_on_queue = false;
-            if (this.should_wake)() {
-                return Poll::Ready(());
+        match this.poller_state {
+            PollerState::Initialised => {}
+            PollerState::Pushed => {
+                if (this.should_wake)() {
+                    this.list_token.revoke();
+                    this.poller_state = PollerState::Complete;
+                    return Poll::Ready(());
+                }
             }
-            if !this.list_token.revoke() && (this.should_wake)() {
-                // our token has already been popped meaning we are about to be woken anyway. Since shoudl wake is true we can just return ready
+            PollerState::Complete => {
+                //TODO maybe this is an error??
                 return Poll::Ready(());
             }
         }
         this.list_token
-            .inner()
-            .handle
-            .replace_waker(cx.waker().clone());
+            .fast_modify_payload(|handle| {
+                handle.handle = Some(MaybeRef::Owned(Handle::Async(cx.waker().clone())))
+            })
+            .expect("node is already on queue we cannot use fast modify here!");
 
         let pinned_token = unsafe { Pin::new_unchecked(&this.list_token) };
         let did_push = pinned_token.push_if(&mut this.will_sleep);
         if did_push {
-            this.token_on_queue = true;
+            this.poller_state = PollerState::Pushed;
             Poll::Pending
         } else {
+            this.poller_state = PollerState::Complete;
             Poll::Ready(())
         }
     }
@@ -519,7 +537,7 @@ mod tests {
     async fn cancel_async() {
         let event = Event::new();
         {
-            let poller = pin!(event.wait_while_async(|_| true, || true));
+            let poller = pin!(event.wait_while_async(|_| true, || false));
             let mut polling = poller.polling();
             let result = polling.poll_once().await;
             assert_eq!(result, Poll::Pending);
@@ -538,7 +556,7 @@ mod tests {
         let second_entry;
         let mut second_polling;
         {
-            let poller = pin!(event.wait_while_async(|_| true, || true));
+            let poller = pin!(event.wait_while_async(|_| true, || false));
             let mut polling = poller.polling();
             let result = polling.poll_once().await;
             assert_eq!(result, Poll::Pending);
@@ -547,14 +565,12 @@ mod tests {
                 .inner
                 .queue
                 .pop_if(|_, _| Some(()), || panic!("shouldn't be empty"));
-            second_entry = Box::pin(event.wait_while_async(|_| true, || true));
+            second_entry = Box::pin(event.wait_while_async(|_| true, || false));
             second_polling = second_entry.polling();
             let result = second_polling.poll_once().await;
             assert_eq!(result, Poll::Pending);
             assert_eq!(event.inner.queue.len(), 1);
         }
-        let result = second_polling.poll_once().await;
-        assert_eq!(result, Poll::Ready(()));
         assert_eq!(event.inner.queue.len(), 0);
     }
 

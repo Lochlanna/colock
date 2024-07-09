@@ -8,9 +8,11 @@
 use core::cell::Cell;
 use core::fmt::{Debug, Formatter};
 use core::pin::Pin;
+use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // Alias MiniLock to allow for testing with other lock implementations
-use mini_lock::MiniLock as InnerLock;
+use mini_lock::{MiniLock as InnerLock, MiniLockGuard};
 
 /// Outer container for intrusive linked list. Proxies calls to the inner list
 /// through the inner lock
@@ -46,7 +48,7 @@ impl<T> ConcurrentIntrusiveLinkedList<T> {
     /// Refer to [`IntrusiveLinkedList::pop_if`] for more information.
     pub fn pop_if<R>(
         &self,
-        condition: impl FnMut(&T, usize) -> Option<R>,
+        condition: impl FnMut(&mut T, usize) -> Option<R>,
         on_empty: impl FnMut(),
     ) -> Option<R> {
         let mut inner = self.inner.lock();
@@ -67,7 +69,6 @@ impl<T> ConcurrentIntrusiveLinkedList<T> {
         T: 'a + Send,
     {
         ListToken {
-            is_on_queue: Cell::new(false),
             queue: self,
             node,
             _unpin: core::marker::PhantomPinned,
@@ -117,7 +118,7 @@ impl<T> IntrusiveLinkedList<T> {
     /// returned from the condition check.
     fn pop_if<R>(
         &mut self,
-        mut condition: impl FnMut(&T, usize) -> Option<R>,
+        mut condition: impl FnMut(&mut T, usize) -> Option<R>,
         mut on_empty: impl FnMut(),
     ) -> Option<R> {
         if self.head.is_null() {
@@ -128,11 +129,18 @@ impl<T> IntrusiveLinkedList<T> {
         }
         unsafe {
             let tail = &*self.tail;
-            debug_assert!(tail.is_on_queue.get());
-            let ret = condition(&tail.data, self.length);
-            ret.as_ref()?;
+            debug_assert!(tail.is_on_queue.load(Ordering::Relaxed));
+            let ret;
+            {
+                let length = self.length;
+                let tail = tail.as_mut(self);
+                ret = condition(&mut tail.data, length);
+            }
+            if ret.is_none() {
+                return None;
+            }
             tail.remove(self);
-            debug_assert!(!tail.is_on_queue.get());
+            debug_assert!(!tail.is_on_queue.load(Ordering::Relaxed));
             ret
         }
     }
@@ -183,7 +191,7 @@ pub trait HasNode<S> {
 pub struct Node<T> {
     next: Cell<*const Self>,
     prev: Cell<*const Self>,
-    is_on_queue: Cell<bool>,
+    is_on_queue: AtomicBool,
     data: T,
 }
 
@@ -196,7 +204,7 @@ impl<T> Debug for Node<T> {
         f.debug_struct("Node")
             .field("next", &self.next.get())
             .field("prev", &self.prev.get())
-            .field("is_on_queue", &self.is_on_queue.get())
+            .field("is_on_queue", &self.is_on_queue.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -207,9 +215,16 @@ impl<T> Node<T> {
         Self {
             next: Cell::new(core::ptr::null()),
             prev: Cell::new(core::ptr::null()),
-            is_on_queue: Cell::new(false),
+            is_on_queue: AtomicBool::new(false),
             data,
         }
+    }
+
+    fn as_mut<'l, 's>(&self, _guard: &'l mut IntrusiveLinkedList<T>) -> &'s mut Self
+    where
+        'l: 's,
+    {
+        unsafe { ptr::from_ref(self).cast_mut().as_mut().unwrap() }
     }
 }
 impl<T> Node<T> {
@@ -223,11 +238,17 @@ impl<T> Node<T> {
         queue: &mut IntrusiveLinkedList<T>,
         mut condition: impl FnMut(usize) -> bool,
     ) -> bool {
+        if self.is_on_queue.load(Ordering::Acquire) {
+            //already on the queue
+            return true;
+        }
         let inner_node = self;
         if !condition(queue.length) {
-            debug_assert!(!inner_node.is_on_queue.get());
+            debug_assert!(!inner_node.is_on_queue.load(Ordering::Relaxed));
             return false;
         }
+        // At this point we are sure that we are going to push to the queue.
+        inner_node.is_on_queue.store(true, Ordering::Release);
 
         inner_node.prev.set(core::ptr::null());
         inner_node.next.set(queue.head);
@@ -239,25 +260,16 @@ impl<T> Node<T> {
             head_ref.prev.set(self);
         }
         queue.head = self;
-        inner_node.is_on_queue.set(true);
-
         queue.length += 1;
-
         true
     }
 
     /// If the node is on the queue it will be removed and true will be returned.
     /// If the node wasn't already on the queue false will be returned.
-    fn revoke(&self, queue: &mut IntrusiveLinkedList<T>) -> bool {
-        if !self.is_on_queue.replace(false) {
+    fn remove(&self, queue: &mut IntrusiveLinkedList<T>) -> bool {
+        if !self.is_on_queue.swap(false, Ordering::AcqRel) {
             return false;
         }
-        self.remove(queue);
-        true
-    }
-
-    /// Removes the node from the queue.
-    fn remove(&self, queue: &mut IntrusiveLinkedList<T>) {
         let inner_node = self;
         queue.length -= 1;
 
@@ -288,8 +300,7 @@ impl<T> Node<T> {
 
         inner_node.next.set(core::ptr::null());
         inner_node.prev.set(core::ptr::null());
-
-        inner_node.is_on_queue.set(false);
+        true
     }
 }
 
@@ -302,7 +313,6 @@ pub struct ListToken<'a, T>
 where
     T: Send,
 {
-    is_on_queue: Cell<bool>,
     queue: &'a ConcurrentIntrusiveLinkedList<T>,
     node: Node<T>,
     _unpin: core::marker::PhantomPinned,
@@ -315,9 +325,7 @@ where
     fn drop(&mut self) {
         // it's possible that the node isn't actually on the queue even if is_on_queue is true
         // it's never possible that it's on the queue if is_on_queue is false
-        if self.is_on_queue.get() {
-            self.revoke();
-        }
+        self.revoke();
     }
 }
 
@@ -332,7 +340,6 @@ where
 
     /// Conditionally push the node onto the front of the queue.
     pub fn push_if(self: Pin<&Self>, condition: impl FnMut(usize) -> bool) -> bool {
-        self.is_on_queue.set(true);
         let mut queue = self.queue.inner.lock();
         self.node.push_if(&mut queue, condition)
     }
@@ -342,9 +349,12 @@ where
     /// Returns true if the node was on the queue and was revoked.
     /// Returns false if the node was not on the queue.
     pub fn revoke(&self) -> bool {
-        self.is_on_queue.set(false);
+        // Don't take out the lock if it is already off the queue
+        if !self.node.is_on_queue.load(Ordering::Acquire) {
+            return false;
+        }
         let mut queue = self.queue.inner.lock();
-        self.node.revoke(&mut queue)
+        self.node.remove(&mut queue)
     }
 
     /// Access the inner value of the token.
@@ -352,11 +362,35 @@ where
         &self.node.data
     }
 
-    /// # Safety
-    /// this will cause the drop code to not attempt to revoke the node from the queue.
-    /// If the node isn't actually off the queue this can result in a use after free
-    pub unsafe fn set_off_queue(&self) {
-        self.is_on_queue.set(false);
+    // TODO proper error type here
+    pub fn fast_modify_payload<R>(&mut self, f: impl Fn(&mut T) -> R) -> Result<R, ()> {
+        if self.node.is_on_queue.load(Ordering::Acquire) {
+            return Err(());
+        }
+        Ok(f(&mut self.node.data))
+    }
+
+    pub fn modify_payload<R>(&self, f: impl Fn(&mut T, bool) -> R) -> R {
+        // while we have the guard the node cannot be popped and used, and therefore we can modify its
+        // contents safely
+        let mut guard = self.queue.inner.lock();
+        let mut_self = self.get_mut(&mut guard);
+        f(
+            &mut mut_self.node.data,
+            self.node.is_on_queue.load(Ordering::Acquire),
+        )
+    }
+
+    pub fn is_on_queue(&self) -> bool {
+        self.node.is_on_queue.load(Ordering::Acquire)
+    }
+
+    fn get_mut<'g, 's>(&self, _guard: &'g mut MiniLockGuard<IntrusiveLinkedList<T>>) -> &'s mut Self
+    where
+        'g: 'a,
+    {
+        // Safety: This is safe because we have a mutble reference to an exclusive lock on the list
+        unsafe { ptr::from_ref(self).cast_mut().as_mut().unwrap() }
     }
 }
 

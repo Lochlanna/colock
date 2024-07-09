@@ -1,8 +1,6 @@
 use crate::spinwait;
 use core::sync::atomic::{AtomicU8, Ordering};
 use event::Event;
-use lock_api::RawMutex as RawMutexAPI;
-use std::time::Instant;
 
 const LOCKED_BIT: u8 = 0b1;
 const WAIT_BIT: u8 = 0b10;
@@ -181,13 +179,9 @@ impl RawMutex {
     }
 }
 
-unsafe impl lock_api::RawMutex for RawMutex {
-    #[allow(clippy::declare_interior_mutable_const)]
-    const INIT: Self = Self::new();
-    type GuardMarker = lock_api::GuardSend;
-
+impl RawMutex {
     #[inline]
-    fn lock(&self) {
+    pub fn lock(&self) {
         let Err(mut state) =
             self.state
                 .compare_exchange_weak(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
@@ -202,7 +196,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
     }
 
     #[inline]
-    fn try_lock(&self) -> bool {
+    pub fn try_lock(&self) -> bool {
         let Err(mut state) =
             self.state
                 .compare_exchange_weak(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
@@ -213,7 +207,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
     }
 
     #[inline]
-    unsafe fn unlock(&self) {
+    pub unsafe fn unlock(&self) {
         let state = self.state.fetch_and(!LOCKED_BIT, Ordering::Release);
         if state & WAIT_BIT == 0 {
             return;
@@ -225,20 +219,18 @@ unsafe impl lock_api::RawMutex for RawMutex {
         });
     }
 
-    fn is_locked(&self) -> bool {
+    pub fn is_locked(&self) -> bool {
         self.state.load(Ordering::Relaxed) & LOCKED_BIT != 0
     }
-}
 
-unsafe impl lock_api::RawMutexFair for RawMutex {
-    unsafe fn unlock_fair(&self) {
+    pub unsafe fn unlock_fair(&self) {
         self.queue.notify_if(self.fair_conditional_notify(), || {
             //unlock from within the queue lock
             self.state.store(0, Ordering::Release);
         });
     }
 
-    unsafe fn bump(&self) {
+    pub unsafe fn bump(&self) {
         if self.state.load(Ordering::Acquire) & WAIT_BIT == 0 {
             return;
         }
@@ -252,21 +244,16 @@ unsafe impl lock_api::RawMutexFair for RawMutex {
             self.lock();
         }
     }
-}
 
-unsafe impl lock_api::RawMutexTimed for RawMutex {
-    type Duration = std::time::Duration;
-    type Instant = Instant;
-
-    fn try_lock_for(&self, timeout: Self::Duration) -> bool {
-        if let Some(timeout) = Instant::now().checked_add(timeout) {
+    pub fn try_lock_for(&self, timeout: core::time::Duration) -> bool {
+        if let Some(timeout) = std::time::Instant::now().checked_add(timeout) {
             return self.try_lock_until(timeout);
         }
         self.lock();
         true
     }
 
-    fn try_lock_until(&self, timeout: Self::Instant) -> bool {
+    pub fn try_lock_until(&self, timeout: std::time::Instant) -> bool {
         let Err(mut state) =
             self.state
                 .compare_exchange_weak(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
@@ -284,7 +271,6 @@ unsafe impl lock_api::RawMutexTimed for RawMutex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lock_api::{RawMutex as RawMutexApi, RawMutexTimed};
     use std::thread;
     use std::time::{Duration, Instant};
 

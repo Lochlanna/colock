@@ -1,37 +1,161 @@
 #![allow(clippy::inline_always)]
 
+mod read_guard;
+mod write_guard;
+
 use crate::raw_rw_lock::RawRwLock;
-use lock_api;
-use std::future::Future;
-
-pub type RwLockReadGuard<'a, T> = lock_api::RwLockReadGuard<'a, RawRwLock, T>;
-pub type RwLockUpgradableReadGuard<'a, T> = lock_api::RwLockUpgradableReadGuard<'a, RawRwLock, T>;
-pub type RwLockWriteGuard<'a, T> = lock_api::RwLockWriteGuard<'a, RawRwLock, T>;
-pub type RwLock<T> = lock_api::RwLock<RawRwLock, T>;
-
-pub trait AsyncRwLock {
-    type InnerType: ?Sized;
-
-    fn read_async(&self) -> impl Future<Output = RwLockReadGuard<'_, Self::InnerType>>;
-    fn write_async(&self) -> impl Future<Output = RwLockWriteGuard<'_, Self::InnerType>>;
+pub use read_guard::*;
+use std::ptr;
+pub use write_guard::*;
+pub struct RwLock<T: ?Sized> {
+    lock: RawRwLock,
+    data: T,
 }
 
-impl<T> AsyncRwLock for RwLock<T>
+impl<T> RwLock<T> {
+    pub const fn new(data: T) -> Self {
+        Self {
+            lock: RawRwLock::new(),
+            data,
+        }
+    }
+
+    pub fn into_inner(self) -> T {
+        self.data
+    }
+
+    pub fn from_raw(raw_rw_lock: RawRwLock, data: T) -> Self {
+        Self {
+            lock: raw_rw_lock,
+            data,
+        }
+    }
+}
+
+impl<T> RwLock<T>
+where
+    T: ?Sized,
+{
+    pub fn data_ptr(&self) -> *mut T {
+        ptr::from_ref(&self.data).cast_mut()
+    }
+    pub unsafe fn make_read_guard_unchecked(&self) -> RwLockReadGuard<'_, T> {
+        RwLockReadGuard::new(self)
+    }
+
+    pub unsafe fn make_write_guard_unchecked(&self) -> RwLockWriteGuard<'_, T> {
+        RwLockWriteGuard::new(self)
+    }
+
+    ///Locks this RwLock with shared read access, blocking the current thread until it can be acquired.
+    ///
+    /// The calling thread will be blocked until there are no more writers which hold the lock. There may be other readers currently inside the lock when this method returns.
+    ///
+    /// Note that attempts to recursively acquire a read lock on a RwLock when the current thread already holds one may result in a deadlock.
+    ///
+    /// Returns an RAII guard which will release this thread’s shared access once it is dropped.
+    pub fn read(&self) -> RwLockReadGuard<T> {
+        self.lock.lock_shared();
+        unsafe { self.make_read_guard_unchecked() }
+    }
+
+    ///Attempts to acquire this RwLock with shared read access.
+    ///
+    /// If the access could not be granted at this time, then None is returned. Otherwise, an RAII guard is returned which will release the shared access when it is dropped.
+    ///
+    /// This function does not block.
+    pub fn try_read(&self) -> Option<RwLockReadGuard<T>> {
+        unsafe {
+            self.lock
+                .try_lock_exclusive()
+                .then(|| self.make_read_guard_unchecked())
+        }
+    }
+
+    ///Locks this RwLock with exclusive write access, blocking the current thread until it can be acquired.
+    ///
+    /// This function will not return while other writers or other readers currently have access to the lock.
+    ///
+    /// Returns an RAII guard which will drop the write access of this RwLock when dropped.
+    pub fn write(&self) -> RwLockWriteGuard<T> {
+        self.lock.lock_exclusive();
+        unsafe { self.make_write_guard_unchecked() }
+    }
+
+    ///Attempts to lock this RwLock with exclusive write access.
+    ///
+    /// If the lock could not be acquired at this time, then None is returned. Otherwise, an RAII guard is returned which will release the lock when it is dropped.
+    ///
+    /// This function does not block.
+    pub fn try_write(&self) -> Option<RwLockWriteGuard<T>> {
+        unsafe {
+            self.lock
+                .try_lock_exclusive()
+                .then(|| self.make_write_guard_unchecked())
+        }
+    }
+
+    ///Returns a mutable reference to the underlying data.
+    ///
+    /// Since this call borrows the RwLock mutably, no actual locking needs to take place—the mutable borrow statically guarantees no locks exist.
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.data
+    }
+
+    /// Checks whether this RwLock is currently locked in any way.
+    pub fn is_locked(&self) -> bool {
+        self.lock.is_locked()
+    }
+
+    ///Check if this RwLock is currently exclusively locked.
+    pub fn is_locked_exclusive(&self) -> bool {
+        self.lock.is_locked_exclusive()
+    }
+
+    ///Forcibly unlocks a read lock.
+    ///
+    /// This is useful when combined with `mem::forget` to hold a lock without the need to maintain a RwLockReadGuard object alive, for example when dealing with FFI.
+    /// Safety
+    ///
+    /// This method must only be called if the current thread logically owns a RwLockReadGuard but that guard has be discarded using `mem::forget`. Behavior is undefined if a rwlock is read-unlocked when not read-locked.
+    pub unsafe fn force_unlock_read(&self) {
+        self.lock.unlock_shared()
+    }
+
+    ///Forcibly unlocks a write lock.
+    ///
+    /// This is useful when combined with `mem::forget` to hold a lock without the need to maintain a `RwLockWriteGuard` object alive, for example when dealing with FFI.
+    /// Safety
+    ///
+    /// This method must only be called if the current thread logically owns a RwLockWriteGuard but that guard has be discarded using `mem::forget`. Behavior is undefined if a rwlock is write-unlocked when not write-locked.
+    pub unsafe fn force_unlock_write(&self) {
+        self.lock.unlock_exclusive()
+    }
+
+    ///Returns the underlying raw reader-writer lock object.
+    ///
+    /// Safety
+    ///
+    /// This method is unsafe because it allows unlocking a mutex while still holding a reference to a lock guard.
+    pub unsafe fn raw(&self) -> &RawRwLock {
+        &self.lock
+    }
+}
+
+impl<T> RwLock<T>
 where
     T: ?Sized + Send + Sync,
 {
-    type InnerType = T;
-
-    async fn read_async(&self) -> RwLockReadGuard<'_, Self::InnerType> {
+    async fn read_async(&self) -> RwLockReadGuard<'_, T> {
         unsafe {
-            self.raw().lock_shared_async().await;
+            self.lock.lock_shared_async().await;
             self.make_read_guard_unchecked()
         }
     }
 
-    async fn write_async(&self) -> RwLockWriteGuard<'_, Self::InnerType> {
+    async fn write_async(&self) -> RwLockWriteGuard<'_, T> {
         unsafe {
-            self.raw().lock_exclusive_async().await;
+            self.lock.lock_exclusive_async().await;
             self.make_write_guard_unchecked()
         }
     }

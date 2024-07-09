@@ -6,7 +6,6 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-lock_api = { version = "0.4.12", features = [] }
 event = { path = "../event" }
 
 [dev-dependencies]

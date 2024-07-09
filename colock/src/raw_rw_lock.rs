@@ -1,9 +1,7 @@
 use core::sync::atomic::AtomicUsize;
 use event::Event;
-use lock_api::RawRwLock as RawRwLockApi;
-use lock_api::RawRwLockTimed as RawRwLockTimedApi;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 pub struct RawRwLock {
@@ -90,7 +88,7 @@ impl RawRwLock {
                 }
             }
         };
-        let should_wake = || RawRwLockApi::try_lock_shared(self);
+        let should_wake = || self.try_lock_shared();
         (should_sleep, should_wake)
     }
     fn lock_shared_slow(&self) {
@@ -132,7 +130,7 @@ impl RawRwLock {
                 }
             }
         };
-        let should_wake = || RawRwLockApi::try_lock_exclusive(self);
+        let should_wake = || self.try_lock_exclusive();
         (should_sleep, should_wake)
     }
 
@@ -249,14 +247,8 @@ impl RawRwLock {
             },
         )
     }
-}
 
-unsafe impl lock_api::RawRwLock for RawRwLock {
-    #[allow(clippy::declare_interior_mutable_const)]
-    const INIT: Self = Self::new();
-    type GuardMarker = lock_api::GuardSend;
-
-    fn lock_shared(&self) {
+    pub fn lock_shared(&self) {
         let Err(mut state) = self.state.compare_exchange_weak(
             0,
             SHARED_LOCK | ONE_SHARED,
@@ -272,7 +264,7 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
         debug_assert!(self.state.load(Ordering::Relaxed).is_shared_locked());
     }
 
-    fn try_lock_shared(&self) -> bool {
+    pub fn try_lock_shared(&self) -> bool {
         let Err(mut state) = self.state.compare_exchange_weak(
             0,
             SHARED_LOCK | ONE_SHARED,
@@ -284,7 +276,7 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
         self.try_lock_shared_inner(&mut state)
     }
 
-    unsafe fn unlock_shared(&self) {
+    pub unsafe fn unlock_shared(&self) {
         let mut state = self.state.fetch_sub(ONE_SHARED, Ordering::Relaxed);
         debug_assert!(state.num_shared() > 0);
         if state.num_shared() == 1 {
@@ -308,7 +300,7 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
         }
     }
 
-    fn lock_exclusive(&self) {
+    pub fn lock_exclusive(&self) {
         let Err(mut state) = self.state.compare_exchange_weak(
             0,
             EXCLUSIVE_LOCK,
@@ -324,7 +316,7 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
         debug_assert!(self.state.load(Ordering::Relaxed).is_exclusive_locked());
     }
 
-    fn try_lock_exclusive(&self) -> bool {
+    pub fn try_lock_exclusive(&self) -> bool {
         let Err(mut state) = self.state.compare_exchange_weak(
             0,
             EXCLUSIVE_LOCK,
@@ -336,7 +328,7 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
         self.try_lock_exclusive_inner(&mut state)
     }
 
-    unsafe fn unlock_exclusive(&self) {
+    pub unsafe fn unlock_exclusive(&self) {
         let mut state = EXCLUSIVE_LOCK;
         while let Err(new_state) = self.state.compare_exchange_weak(
             state,
@@ -351,25 +343,20 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
         }
     }
 
-    fn is_locked(&self) -> bool {
+    pub fn is_locked(&self) -> bool {
         self.state.load(Ordering::Acquire).is_locked()
     }
 
-    fn is_locked_exclusive(&self) -> bool {
+    pub fn is_locked_exclusive(&self) -> bool {
         self.state.load(Ordering::Acquire).is_exclusive_locked()
     }
-}
 
-unsafe impl lock_api::RawRwLockTimed for RawRwLock {
-    type Duration = std::time::Duration;
-    type Instant = Instant;
-
-    fn try_lock_shared_for(&self, timeout: Self::Duration) -> bool {
+    pub fn try_lock_shared_for(&self, timeout: Duration) -> bool {
         let timeout = Instant::now() + timeout;
-        RawRwLockTimedApi::try_lock_shared_until(self, timeout)
+        Self::try_lock_shared_until(self, timeout)
     }
 
-    fn try_lock_shared_until(&self, timeout: Self::Instant) -> bool {
+    pub fn try_lock_shared_until(&self, timeout: Instant) -> bool {
         let Err(mut state) = self.state.compare_exchange_weak(
             0,
             SHARED_LOCK | ONE_SHARED,
@@ -384,12 +371,12 @@ unsafe impl lock_api::RawRwLockTimed for RawRwLock {
         self.lock_shared_slow_timed(timeout)
     }
 
-    fn try_lock_exclusive_for(&self, timeout: Self::Duration) -> bool {
+    pub fn try_lock_exclusive_for(&self, timeout: Duration) -> bool {
         let timeout = Instant::now() + timeout;
-        RawRwLockTimedApi::try_lock_exclusive_until(self, timeout)
+        self.try_lock_exclusive_until(timeout)
     }
 
-    fn try_lock_exclusive_until(&self, timeout: Self::Instant) -> bool {
+    pub fn try_lock_exclusive_until(&self, timeout: Instant) -> bool {
         let Err(mut state) = self.state.compare_exchange_weak(
             0,
             EXCLUSIVE_LOCK,
@@ -403,50 +390,44 @@ unsafe impl lock_api::RawRwLockTimed for RawRwLock {
         }
         self.lock_exclusive_slow_timed(timeout)
     }
-}
 
-unsafe impl lock_api::RawRwLockFair for RawRwLock {
-    unsafe fn unlock_shared_fair(&self) {
+    pub unsafe fn unlock_shared_fair(&self) {
         todo!()
     }
 
-    unsafe fn unlock_exclusive_fair(&self) {
+    pub unsafe fn unlock_exclusive_fair(&self) {
         todo!()
     }
 
-    unsafe fn bump_shared(&self) {
+    //should this be unsafe??
+    pub fn bump_shared(&self) {
         todo!()
     }
 
-    unsafe fn bump_exclusive(&self) {
+    pub unsafe fn bump_exclusive(&self) {
         todo!()
     }
-}
-
-unsafe impl lock_api::RawRwLockUpgrade for RawRwLock {
-    fn lock_upgradable(&self) {
+    pub fn lock_upgradable(&self) {
         todo!()
     }
 
-    fn try_lock_upgradable(&self) -> bool {
+    pub fn try_lock_upgradable(&self) -> bool {
         todo!()
     }
 
-    unsafe fn unlock_upgradable(&self) {
+    pub unsafe fn unlock_upgradable(&self) {
         todo!()
     }
 
-    unsafe fn upgrade(&self) {
+    pub unsafe fn upgrade(&self) {
         todo!()
     }
 
-    unsafe fn try_upgrade(&self) -> bool {
+    pub unsafe fn try_upgrade(&self) -> bool {
         todo!()
     }
-}
 
-unsafe impl lock_api::RawRwLockDowngrade for RawRwLock {
-    unsafe fn downgrade(&self) {
+    pub unsafe fn downgrade(&self) {
         debug_assert!(self.state.load(Ordering::Relaxed).is_exclusive_locked());
         let mut state = EXCLUSIVE_LOCK;
         while let Err(new_state) = self.state.compare_exchange_weak(
@@ -513,7 +494,6 @@ impl RwLockState for usize {
 mod tests {
     use super::*;
     use itertools::Itertools;
-    use lock_api::RawRwLock as RWLockAPI;
     use std::sync::atomic::AtomicU8;
     use std::sync::Arc;
 
