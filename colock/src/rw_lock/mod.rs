@@ -6,7 +6,10 @@ mod write_guard;
 use crate::raw_rw_lock::RawRwLock;
 pub use read_guard::*;
 use std::ptr;
+use std::sync::Arc;
 pub use write_guard::*;
+
+#[derive(Debug)]
 pub struct RwLock<T: ?Sized> {
     lock: RawRwLock,
     data: T,
@@ -43,8 +46,16 @@ where
         RwLockReadGuard::new(self)
     }
 
+    pub unsafe fn make_arc_read_guard_unchecked(self: &Arc<Self>) -> ArcRwLockReadGuard<T> {
+        ArcRwLockReadGuard::new(Arc::clone(self))
+    }
+
     pub unsafe fn make_write_guard_unchecked(&self) -> RwLockWriteGuard<'_, T> {
         RwLockWriteGuard::new(self)
+    }
+
+    pub unsafe fn make_arc_write_guard_unchecked(self: &Arc<Self>) -> ArcRwLockWriteGuard<T> {
+        ArcRwLockWriteGuard::new(Arc::clone(self))
     }
 
     ///Locks this RwLock with shared read access, blocking the current thread until it can be acquired.
@@ -158,6 +169,36 @@ where
             self.lock.lock_exclusive_async().await;
             self.make_write_guard_unchecked()
         }
+    }
+}
+
+trait IsRWLock<T: ?Sized> {
+    fn get_lock(&self) -> &RwLock<T>;
+}
+impl<T> IsRWLock<T> for RwLock<T>
+where
+    T: ?Sized,
+{
+    fn get_lock(&self) -> &RwLock<T> {
+        self
+    }
+}
+
+impl<T> IsRWLock<T> for &RwLock<T>
+where
+    T: ?Sized,
+{
+    fn get_lock(&self) -> &RwLock<T> {
+        self
+    }
+}
+
+impl<T> IsRWLock<T> for Arc<RwLock<T>>
+where
+    T: ?Sized,
+{
+    fn get_lock(&self) -> &RwLock<T> {
+        Arc::as_ref(self)
     }
 }
 
@@ -333,9 +374,9 @@ mod tests {
     fn test_rwlock_unsized() {
         let rw: &RwLock<[i32]> = &RwLock::new([1, 2, 3]);
         {
-            let b = &mut *rw.write();
-            b[0] = 4;
-            b[2] = 5;
+            let mut b = rw.write();
+            (*b)[0] = 4;
+            (*b)[2] = 5;
         }
         let comp: &[i32] = &[4, 2, 5];
         assert_eq!(&*rw.read(), comp);
