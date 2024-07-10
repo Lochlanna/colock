@@ -1,156 +1,18 @@
+mod guard;
+
 use crate::raw_mutex::RawMutex;
-use std::cell::UnsafeCell;
-use std::fmt::{Debug, Display, Formatter};
-use std::ops::{Deref, DerefMut};
-use std::ptr;
+use std::fmt::Debug;
+use std::ops::DerefMut;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-pub struct MutexGuard<'a, T>
-where
-    T: ?Sized,
-{
-    mutex: &'a Mutex<T>,
-}
+pub use guard::*;
 
-impl<'a, T> Drop for MutexGuard<'a, T>
-where
-    T: ?Sized,
-{
-    fn drop(&mut self) {
-        unsafe { self.mutex.raw().unlock() }
-    }
-}
-
-impl<'a, T> Deref for MutexGuard<'a, T>
-where
-    T: ?Sized,
-{
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.mutex.data
-    }
-}
-
-impl<'a, T> DerefMut for MutexGuard<'a, T>
-where
-    T: ?Sized,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { ptr::from_ref(&self.mutex.data).cast_mut().as_mut().unwrap() }
-    }
-}
-
-impl<'a, T> Debug for MutexGuard<'a, T>
-where
-    T: Debug + ?Sized,
-{
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MutexGuard")
-            .field("mutex", &self.mutex)
-            .finish()
-    }
-}
-
-impl<'a, T> Display for MutexGuard<'a, T>
-where
-    T: Display + ?Sized,
-{
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", &self.mutex.data)
-    }
-}
-
-unsafe impl<'a, T> Sync for MutexGuard<'a, T> where T: Sync + 'a + ?Sized {}
-
-impl<'a, T> MutexGuard<'a, T>
-where
-    T: ?Sized,
-{
-    //TODO test me...
-    pub fn bump(&mut self) {
-        unsafe { self.mutex.raw_mutex.bump() }
-    }
-
-    pub fn leak(self) -> &'a mut T {
-        let mut_data_ref = unsafe { ptr::from_ref(&self.mutex.data).cast_mut().as_mut().unwrap() };
-        core::mem::forget(self);
-        mut_data_ref
-    }
-
-    pub fn mutex(&self) -> &'a Mutex<T> {
-        self.mutex
-    }
-
-    pub fn unlock_fair(self) {
-        unsafe {
-            self.mutex.raw_mutex.unlock_fair();
-        }
-        core::mem::forget(self)
-    }
-
-    pub fn unlocked<F, U>(&mut self, f: F)
-    where
-        F: FnOnce() -> U,
-    {
-        unsafe { self.mutex.raw_mutex.unlock() }
-        let result = f();
-        self.mutex.raw_mutex.lock();
-        result
-    }
-
-    pub fn unlocked_fair<F, U>(&mut self, f: F)
-    where
-        F: FnOnce() -> U,
-    {
-        unsafe { self.mutex.raw_mutex.unlock_fair() }
-        let result = f();
-        self.mutex.raw_mutex.lock();
-        result
-    }
-}
-
-pub struct ArcMutexGuard<T>
-where
-    T: ?Sized,
-{
-    mutex: Arc<Mutex<T>>,
-}
-
-impl<T> Drop for ArcMutexGuard<T>
-where
-    T: ?Sized,
-{
-    fn drop(&mut self) {
-        unsafe { self.mutex.raw().unlock() }
-    }
-}
-
-impl<T> Deref for ArcMutexGuard<T>
-where
-    T: ?Sized,
-{
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.mutex.data
-    }
-}
-
-impl<T> DerefMut for ArcMutexGuard<T>
-where
-    T: ?Sized,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { ptr::from_ref(&self.mutex.data).cast_mut().as_mut().unwrap() }
-    }
-}
-
+#[derive(Debug)]
 pub struct Mutex<T: ?Sized> {
     raw_mutex: RawMutex,
-    data: UnsafeCell<T>,
+    data: T,
 }
 
 impl<T> Default for Mutex<T>
@@ -170,18 +32,6 @@ impl<T> From<T> for Mutex<T> {
 
 unsafe impl<T> Send for Mutex<T> where T: Send + ?Sized {}
 unsafe impl<T> Sync for Mutex<T> where T: Send + ?Sized {}
-
-impl<T> Debug for Mutex<T>
-where
-    T: Debug,
-{
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Mutex")
-            .field("data", &self.data)
-            .field("raw_mutex", &self.raw_mutex)
-            .finish()
-    }
-}
 
 impl<T> Mutex<T> {
     pub const fn new(data: T) -> Self {
@@ -287,13 +137,11 @@ where
     }
 
     pub unsafe fn make_guard_unchecked(&self) -> MutexGuard<'_, T> {
-        MutexGuard { mutex: self }
+        MutexGuard::new(self)
     }
 
     pub unsafe fn make_arc_guard_unchecked(self: &Arc<Self>) -> ArcMutexGuard<T> {
-        ArcMutexGuard {
-            mutex: Arc::clone(self),
-        }
+        ArcMutexGuard::new(Arc::clone(self))
     }
 
     pub fn is_locked(&self) -> bool {

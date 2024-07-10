@@ -9,7 +9,7 @@ use std::ptr;
 use std::sync::Arc;
 pub use write_guard::*;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RwLock<T: ?Sized> {
     lock: RawRwLock,
     data: T,
@@ -174,14 +174,6 @@ where
 
 trait IsRWLock<T: ?Sized> {
     fn get_lock(&self) -> &RwLock<T>;
-}
-impl<T> IsRWLock<T> for RwLock<T>
-where
-    T: ?Sized,
-{
-    fn get_lock(&self) -> &RwLock<T> {
-        self
-    }
 }
 
 impl<T> IsRWLock<T> for &RwLock<T>

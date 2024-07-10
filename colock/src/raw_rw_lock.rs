@@ -3,7 +3,7 @@ use event::Event;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RawRwLock {
     state: AtomicUsize,
     reader_queue: Event,
