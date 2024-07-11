@@ -5,12 +5,12 @@ use std::mem::forget;
 use std::ops::Deref;
 use std::sync::Arc;
 
-pub struct RwLockReadGuardBase<T: ?Sized, L: IsRWLock<T>> {
+pub struct ReadGuardBase<T: ?Sized, L: IsRWLock<T>> {
     lock: L,
     phantom_data: PhantomData<T>,
 }
 
-impl<T, L> Drop for RwLockReadGuardBase<T, L>
+impl<T, L> Drop for ReadGuardBase<T, L>
 where
     T: ?Sized,
     L: IsRWLock<T>,
@@ -22,27 +22,27 @@ where
     }
 }
 
-impl<T, L> Display for RwLockReadGuardBase<T, L>
+impl<T, L> Display for ReadGuardBase<T, L>
 where
     T: ?Sized + Display,
     L: IsRWLock<T>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.lock.get_lock().data, f)
+        Display::fmt(&self.lock.data(), f)
     }
 }
 
-impl<T, L> Debug for RwLockReadGuardBase<T, L>
+impl<T, L> Debug for ReadGuardBase<T, L>
 where
     T: ?Sized + Debug,
     L: IsRWLock<T>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        Debug::fmt(&self.lock.get_lock().data, f)
+        Debug::fmt(&self.lock.data(), f)
     }
 }
 
-impl<T, L> Deref for RwLockReadGuardBase<T, L>
+impl<T, L> Deref for ReadGuardBase<T, L>
 where
     T: ?Sized,
     L: IsRWLock<T>,
@@ -50,16 +50,16 @@ where
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.lock.get_lock().data
+        &self.lock.data()
     }
 }
 
-impl<T, L> RwLockReadGuardBase<T, L>
+impl<T, L> ReadGuardBase<T, L>
 where
     T: ?Sized,
     L: IsRWLock<T>,
 {
-    pub(crate) const unsafe fn new(lock: L) -> Self {
+    pub(crate) const fn new(lock: L) -> Self {
         Self {
             lock,
             phantom_data: PhantomData,
@@ -76,16 +76,16 @@ where
         F: FnOnce() -> U,
     {
         unsafe {
-            self.lock.get_lock().lock.unlock_shared();
+            self.lock.raw().unlock_shared();
         }
         let result = f();
-        self.lock.get_lock().lock.lock_shared();
+        self.lock.raw().lock_shared();
         result
     }
 
     pub fn unlock_fair(self) {
         unsafe {
-            self.lock.get_lock().lock.unlock_shared_fair();
+            self.lock.raw().unlock_shared_fair();
         }
         forget(self);
     }
@@ -95,20 +95,20 @@ where
         F: FnOnce() -> U,
     {
         unsafe {
-            self.lock.get_lock().lock.unlock_shared_fair();
+            self.lock.raw().unlock_shared_fair();
         }
         let result = f();
-        self.lock.get_lock().lock.lock_shared();
+        self.lock.raw().lock_shared();
         result
     }
 
     pub fn bump(&self) {
-        self.lock.get_lock().lock.bump_shared();
+        self.lock.raw().bump_shared();
     }
 }
 
-pub type RwLockReadGuard<'a, T: ?Sized> = RwLockReadGuardBase<T, &'a RwLock<T>>;
-pub type ArcRwLockReadGuard<T: ?Sized> = RwLockReadGuardBase<T, Arc<RwLock<T>>>;
+pub type ReadGuard<'a, T: ?Sized> = ReadGuardBase<T, &'a RwLock<T>>;
+pub type ArcReadGuard<T: ?Sized> = ReadGuardBase<T, Arc<RwLock<T>>>;
 
 //unit tests
 #[cfg(test)]

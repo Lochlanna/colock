@@ -1,31 +1,9 @@
-use crate::mutex::Mutex;
+use crate::mutex::{IsMutex, Mutex};
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::ptr;
 use std::sync::Arc;
-
-trait IsMutex<T: ?Sized> {
-    fn get_mutex(&self) -> &Mutex<T>;
-}
-
-impl<T> IsMutex<T> for &Mutex<T>
-where
-    T: ?Sized,
-{
-    fn get_mutex(&self) -> &Mutex<T> {
-        self
-    }
-}
-
-impl<T> IsMutex<T> for Arc<Mutex<T>>
-where
-    T: ?Sized,
-{
-    fn get_mutex(&self) -> &Mutex<T> {
-        Arc::as_ref(self)
-    }
-}
 
 pub struct MutexGuardBase<T, M>
 where
@@ -42,7 +20,7 @@ where
     M: IsMutex<T>,
 {
     fn drop(&mut self) {
-        unsafe { self.mutex().raw().unlock() }
+        unsafe { self.mutex.raw().unlock() }
     }
 }
 
@@ -54,7 +32,7 @@ where
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.mutex().data
+        &self.mutex.data()
     }
 }
 
@@ -65,7 +43,7 @@ where
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
-            ptr::from_ref(&self.mutex().data)
+            ptr::from_ref(self.mutex.data())
                 .cast_mut()
                 .as_mut()
                 .unwrap()
@@ -91,7 +69,7 @@ where
     M: IsMutex<T>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", &self.mutex().data)
+        write!(f, "{}", &self.mutex.data())
     }
 }
 
@@ -109,7 +87,7 @@ where
 {
     pub fn leak(self) -> &'l mut T {
         let mut_data_ref = unsafe {
-            ptr::from_ref(&self.mutex().data)
+            ptr::from_ref(self.mutex.data())
                 .cast_mut()
                 .as_mut()
                 .unwrap()

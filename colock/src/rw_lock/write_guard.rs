@@ -1,49 +1,49 @@
-use crate::rw_lock::{ArcRwLockReadGuard, IsRWLock, RwLock, RwLockReadGuard};
+use crate::rw_lock::{ArcReadGuard, IsRWLock, ReadGuard, RwLock};
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::mem::forget;
 use std::ops::{Deref, DerefMut};
+use std::ptr;
 use std::sync::Arc;
-use std::{mem, ptr};
 
-pub struct RwLockWriteGuardBase<T: ?Sized, L: IsRWLock<T>> {
+pub struct WriteGuardBase<T: ?Sized, L: IsRWLock<T>> {
     lock: L,
     phantom_data: PhantomData<T>,
 }
 
-impl<T, L> Drop for RwLockWriteGuardBase<T, L>
+impl<T, L> Drop for WriteGuardBase<T, L>
 where
     T: ?Sized,
     L: IsRWLock<T>,
 {
     fn drop(&mut self) {
         unsafe {
-            self.lock.get_lock().lock.unlock_exclusive();
+            self.lock.raw().unlock_exclusive();
         }
     }
 }
 
-impl<T, L> Display for RwLockWriteGuardBase<T, L>
+impl<T, L> Display for WriteGuardBase<T, L>
 where
     T: ?Sized + Display,
     L: IsRWLock<T>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.lock.get_lock().data, f)
+        Display::fmt(&self.lock.data(), f)
     }
 }
 
-impl<T, L> Debug for RwLockWriteGuardBase<T, L>
+impl<T, L> Debug for WriteGuardBase<T, L>
 where
     T: ?Sized + Debug,
     L: IsRWLock<T>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        Debug::fmt(&self.lock.get_lock().data, f)
+        Debug::fmt(&self.lock.data(), f)
     }
 }
 
-impl<T, L> Deref for RwLockWriteGuardBase<T, L>
+impl<T, L> Deref for WriteGuardBase<T, L>
 where
     T: ?Sized,
     L: IsRWLock<T>,
@@ -51,18 +51,18 @@ where
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.lock.get_lock().data
+        &self.lock.data()
     }
 }
 
-impl<T, L> DerefMut for RwLockWriteGuardBase<T, L>
+impl<T, L> DerefMut for WriteGuardBase<T, L>
 where
     T: ?Sized,
     L: IsRWLock<T>,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
-            ptr::from_ref(&self.lock.get_lock().data)
+            ptr::from_ref(self.lock.data())
                 .cast_mut()
                 .as_mut()
                 .expect("couldn't cast pointer to reference")
@@ -70,12 +70,12 @@ where
     }
 }
 
-impl<T, L> RwLockWriteGuardBase<T, L>
+impl<T, L> WriteGuardBase<T, L>
 where
     T: ?Sized,
     L: IsRWLock<T>,
 {
-    pub(crate) const unsafe fn new(lock: L) -> Self {
+    pub(crate) const fn new(lock: L) -> Self {
         Self {
             lock,
             phantom_data: PhantomData,
@@ -90,25 +90,25 @@ where
         F: FnOnce() -> U,
     {
         unsafe {
-            self.lock.get_lock().lock.unlock_exclusive();
+            self.lock.raw().unlock_exclusive();
         }
         let result = f();
-        self.lock.get_lock().lock.lock_exclusive();
+        self.lock.raw().lock_exclusive();
         result
     }
 
     pub fn unlock_fair(self) {
         unsafe {
-            self.lock.get_lock().lock.unlock_exclusive_fair();
+            self.lock.raw().unlock_exclusive_fair();
         }
         forget(self);
     }
 }
 
-pub type RwLockWriteGuard<'a, T: ?Sized> = RwLockWriteGuardBase<T, &'a RwLock<T>>;
+pub type WriteGuard<'a, T: ?Sized> = WriteGuardBase<T, &'a RwLock<T>>;
 
-impl<'a, T> RwLockWriteGuard<'a, T> {
-    pub fn downgrade(self) -> RwLockReadGuard<'a, T> {
+impl<'a, T> WriteGuard<'a, T> {
+    pub fn downgrade(self) -> ReadGuard<'a, T> {
         let read_guard = unsafe {
             self.lock.raw().downgrade();
             self.lock.make_read_guard_unchecked()
@@ -118,10 +118,10 @@ impl<'a, T> RwLockWriteGuard<'a, T> {
         read_guard
     }
 }
-pub type ArcRwLockWriteGuard<T: ?Sized> = RwLockWriteGuardBase<T, Arc<RwLock<T>>>;
+pub type ArcWriteGuard<T: ?Sized> = WriteGuardBase<T, Arc<RwLock<T>>>;
 
-impl<T> ArcRwLockWriteGuard<T> {
-    pub fn downgrade(self) -> ArcRwLockReadGuard<T> {
+impl<T> ArcWriteGuard<T> {
+    pub fn downgrade(self) -> ArcReadGuard<T> {
         let read_guard = unsafe {
             self.lock.raw().downgrade();
             self.lock.make_arc_read_guard_unchecked()

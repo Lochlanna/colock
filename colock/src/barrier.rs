@@ -1,4 +1,4 @@
-use crate::mutex::{AsyncMutex, Mutex, MutexGuard};
+use crate::mutex::{Mutex, MutexGuard};
 use event::Event;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

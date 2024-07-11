@@ -71,65 +71,43 @@ where
     }
 
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
-        if self.raw().try_lock() {
-            Some(unsafe { self.make_guard_unchecked() })
-        } else {
-            None
-        }
+        self.raw().try_lock().then(|| self.make_guard())
     }
 
     pub fn try_lock_for(&self, duration: Duration) -> Option<MutexGuard<'_, T>> {
-        if self.raw().try_lock_for(duration) {
-            Some(unsafe { self.make_guard_unchecked() })
-        } else {
-            None
-        }
+        self.raw().try_lock_for(duration).then(|| self.make_guard())
     }
 
     pub fn try_lock_until(&self, timeout: Instant) -> Option<MutexGuard<'_, T>> {
-        if self.raw().try_lock_until(timeout) {
-            Some(unsafe { self.make_guard_unchecked() })
-        } else {
-            None
-        }
+        self.raw()
+            .try_lock_until(timeout)
+            .then(|| self.make_guard())
     }
 
     pub fn try_lock_arc(self: &Arc<Self>) -> Option<ArcMutexGuard<T>> {
-        if self.raw().try_lock() {
-            Some(unsafe { self.make_arc_guard_unchecked() })
-        } else {
-            None
-        }
+        self.raw().try_lock().then(|| self.make_arc_guard())
     }
 
     pub fn try_lock_arc_for(self: &Arc<Self>, duration: Duration) -> Option<ArcMutexGuard<T>> {
-        if self.raw().try_lock_for(duration) {
-            Some(unsafe { self.make_arc_guard_unchecked() })
-        } else {
-            None
-        }
+        self.raw()
+            .try_lock_for(duration)
+            .then(|| self.make_arc_guard())
     }
 
     pub fn try_lock_arc_until(self: &Arc<Self>, timeout: Instant) -> Option<ArcMutexGuard<T>> {
-        if self.raw().try_lock_until(timeout) {
-            Some(unsafe { self.make_arc_guard_unchecked() })
-        } else {
-            None
-        }
+        self.raw()
+            .try_lock_until(timeout)
+            .then(|| self.make_arc_guard())
     }
 
     pub fn lock(&self) -> MutexGuard<'_, T> {
-        unsafe {
-            self.raw().lock();
-            self.make_guard_unchecked()
-        }
+        self.raw().lock();
+        self.make_guard()
     }
 
     pub fn lock_arc(self: &Arc<Self>) -> ArcMutexGuard<T> {
-        unsafe {
-            self.raw().lock();
-            self.make_arc_guard_unchecked()
-        }
+        self.raw().lock();
+        self.make_arc_guard()
     }
 
     pub fn raw(&self) -> &RawMutex {
@@ -137,11 +115,19 @@ where
     }
 
     pub unsafe fn make_guard_unchecked(&self) -> MutexGuard<'_, T> {
-        MutexGuard::new(self)
+        self.make_guard()
+    }
+
+    fn make_guard(&self) -> MutexGuard<'_, T> {
+        unsafe { MutexGuard::new(self) }
     }
 
     pub unsafe fn make_arc_guard_unchecked(self: &Arc<Self>) -> ArcMutexGuard<T> {
-        ArcMutexGuard::new(Arc::clone(self))
+        self.make_arc_guard()
+    }
+
+    fn make_arc_guard(self: &Arc<Self>) -> ArcMutexGuard<T> {
+        unsafe { ArcMutexGuard::new(Arc::clone(self)) }
     }
 
     pub fn is_locked(&self) -> bool {
@@ -186,10 +172,53 @@ where
     /// ```
 
     pub async fn lock_async(&self) -> MutexGuard<'_, T> {
-        unsafe {
-            self.raw().lock_async().await;
-            self.make_guard_unchecked()
-        }
+        self.raw().lock_async().await;
+        self.make_guard()
+    }
+
+    pub async fn lock_async_arc(self: &Arc<Self>) -> ArcMutexGuard<T> {
+        self.raw().lock_async().await;
+        self.make_arc_guard()
+    }
+}
+
+trait IsMutex<T: ?Sized> {
+    fn get_mutex(&self) -> &Mutex<T>;
+    fn raw(&self) -> &RawMutex;
+    fn data(&self) -> &T;
+}
+
+impl<T> IsMutex<T> for &Mutex<T>
+where
+    T: ?Sized,
+{
+    fn get_mutex(&self) -> &Mutex<T> {
+        self
+    }
+
+    fn raw(&self) -> &RawMutex {
+        &self.raw_mutex
+    }
+
+    fn data(&self) -> &T {
+        &self.data
+    }
+}
+
+impl<T> IsMutex<T> for Arc<Mutex<T>>
+where
+    T: ?Sized,
+{
+    fn get_mutex(&self) -> &Mutex<T> {
+        Arc::as_ref(self)
+    }
+
+    fn raw(&self) -> &RawMutex {
+        &self.raw_mutex
+    }
+
+    fn data(&self) -> &T {
+        &self.data
     }
 }
 

@@ -7,6 +7,7 @@ use crate::raw_rw_lock::RawRwLock;
 pub use read_guard::*;
 use std::ptr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 pub use write_guard::*;
 
 #[derive(Debug, Default)]
@@ -42,68 +43,124 @@ where
     pub fn data_ptr(&self) -> *mut T {
         ptr::from_ref(&self.data).cast_mut()
     }
-    pub unsafe fn make_read_guard_unchecked(&self) -> RwLockReadGuard<'_, T> {
-        RwLockReadGuard::new(self)
+
+    fn make_read_guard(&self) -> ReadGuard<'_, T> {
+        ReadGuard::new(self)
+    }
+    pub unsafe fn make_read_guard_unchecked(&self) -> ReadGuard<'_, T> {
+        self.make_read_guard()
     }
 
-    pub unsafe fn make_arc_read_guard_unchecked(self: &Arc<Self>) -> ArcRwLockReadGuard<T> {
-        ArcRwLockReadGuard::new(Arc::clone(self))
+    fn make_arc_read_guard(self: &Arc<Self>) -> ArcReadGuard<T> {
+        ArcReadGuard::new(Arc::clone(self))
+    }
+    pub unsafe fn make_arc_read_guard_unchecked(self: &Arc<Self>) -> ArcReadGuard<T> {
+        self.make_arc_read_guard()
     }
 
-    pub unsafe fn make_write_guard_unchecked(&self) -> RwLockWriteGuard<'_, T> {
-        RwLockWriteGuard::new(self)
+    fn make_write_guard(&self) -> WriteGuard<'_, T> {
+        WriteGuard::new(self)
+    }
+    pub unsafe fn make_write_guard_unchecked(&self) -> WriteGuard<'_, T> {
+        self.make_write_guard()
     }
 
-    pub unsafe fn make_arc_write_guard_unchecked(self: &Arc<Self>) -> ArcRwLockWriteGuard<T> {
-        ArcRwLockWriteGuard::new(Arc::clone(self))
+    fn make_arc_write_guard(self: &Arc<Self>) -> ArcWriteGuard<T> {
+        ArcWriteGuard::new(Arc::clone(self))
     }
 
-    ///Locks this RwLock with shared read access, blocking the current thread until it can be acquired.
-    ///
-    /// The calling thread will be blocked until there are no more writers which hold the lock. There may be other readers currently inside the lock when this method returns.
-    ///
-    /// Note that attempts to recursively acquire a read lock on a RwLock when the current thread already holds one may result in a deadlock.
-    ///
-    /// Returns an RAII guard which will release this thread’s shared access once it is dropped.
-    pub fn read(&self) -> RwLockReadGuard<T> {
+    pub unsafe fn make_arc_write_guard_unchecked(self: &Arc<Self>) -> ArcWriteGuard<T> {
+        self.make_arc_write_guard()
+    }
+
+    pub fn read(&self) -> ReadGuard<T> {
         self.lock.lock_shared();
-        unsafe { self.make_read_guard_unchecked() }
+        self.make_read_guard()
     }
 
-    ///Attempts to acquire this RwLock with shared read access.
-    ///
-    /// If the access could not be granted at this time, then None is returned. Otherwise, an RAII guard is returned which will release the shared access when it is dropped.
-    ///
-    /// This function does not block.
-    pub fn try_read(&self) -> Option<RwLockReadGuard<T>> {
-        unsafe {
-            self.lock
-                .try_lock_exclusive()
-                .then(|| self.make_read_guard_unchecked())
-        }
+    pub fn arc_read(self: &Arc<Self>) -> ArcReadGuard<T> {
+        self.lock.lock_shared();
+        self.make_arc_read_guard()
     }
 
-    ///Locks this RwLock with exclusive write access, blocking the current thread until it can be acquired.
-    ///
-    /// This function will not return while other writers or other readers currently have access to the lock.
-    ///
-    /// Returns an RAII guard which will drop the write access of this RwLock when dropped.
-    pub fn write(&self) -> RwLockWriteGuard<T> {
+    pub fn try_read(&self) -> Option<ReadGuard<T>> {
+        self.lock.try_lock_shared().then(|| self.make_read_guard())
+    }
+
+    pub fn try_read_arc(self: &Arc<Self>) -> Option<ArcReadGuard<T>> {
+        self.lock
+            .try_lock_shared()
+            .then(|| self.make_arc_read_guard())
+    }
+
+    pub fn try_read_for(&self, timeout: Duration) -> Option<ReadGuard<T>> {
+        self.lock
+            .try_lock_shared_for(timeout)
+            .then(|| self.make_read_guard())
+    }
+
+    pub fn try_read_for_arc(self: &Arc<Self>, timeout: Duration) -> Option<ArcReadGuard<T>> {
+        self.lock
+            .try_lock_shared_for(timeout)
+            .then(|| self.make_arc_read_guard())
+    }
+
+    pub fn try_read_until(&self, timeout: Instant) -> Option<ReadGuard<T>> {
+        self.lock
+            .try_lock_shared_until(timeout)
+            .then(|| self.make_read_guard())
+    }
+
+    pub fn try_read_until_arc(self: &Arc<Self>, timeout: Instant) -> Option<ArcReadGuard<T>> {
+        self.lock
+            .try_lock_shared_until(timeout)
+            .then(|| self.make_arc_read_guard())
+    }
+
+    pub fn write(&self) -> WriteGuard<T> {
         self.lock.lock_exclusive();
-        unsafe { self.make_write_guard_unchecked() }
+        self.make_write_guard()
     }
 
-    ///Attempts to lock this RwLock with exclusive write access.
-    ///
-    /// If the lock could not be acquired at this time, then None is returned. Otherwise, an RAII guard is returned which will release the lock when it is dropped.
-    ///
-    /// This function does not block.
-    pub fn try_write(&self) -> Option<RwLockWriteGuard<T>> {
-        unsafe {
-            self.lock
-                .try_lock_exclusive()
-                .then(|| self.make_write_guard_unchecked())
-        }
+    pub fn arc_write(self: &Arc<Self>) -> ArcWriteGuard<T> {
+        self.lock.lock_exclusive();
+        self.make_arc_write_guard()
+    }
+
+    pub fn try_write(&self) -> Option<WriteGuard<T>> {
+        self.lock
+            .try_lock_exclusive()
+            .then(|| self.make_write_guard())
+    }
+
+    pub fn try_write_arc(self: &Arc<Self>) -> Option<ArcWriteGuard<T>> {
+        self.lock
+            .try_lock_exclusive()
+            .then(|| self.make_arc_write_guard())
+    }
+
+    pub fn try_write_for(&self, timeout: Duration) -> Option<WriteGuard<T>> {
+        self.lock
+            .try_lock_exclusive_for(timeout)
+            .then(|| self.make_write_guard())
+    }
+
+    pub fn try_write_for_arc(self: &Arc<Self>, timeout: Duration) -> Option<ArcWriteGuard<T>> {
+        self.lock
+            .try_lock_exclusive_for(timeout)
+            .then(|| self.make_arc_write_guard())
+    }
+
+    pub fn try_write_until(&self, timeout: Instant) -> Option<WriteGuard<T>> {
+        self.lock
+            .try_lock_exclusive_until(timeout)
+            .then(|| self.make_write_guard())
+    }
+
+    pub fn try_write_until_arc(self: &Arc<Self>, timeout: Instant) -> Option<ArcWriteGuard<T>> {
+        self.lock
+            .try_lock_exclusive_until(timeout)
+            .then(|| self.make_arc_write_guard())
     }
 
     ///Returns a mutable reference to the underlying data.
@@ -157,31 +214,47 @@ impl<T> RwLock<T>
 where
     T: ?Sized + Send + Sync,
 {
-    async fn read_async(&self) -> RwLockReadGuard<'_, T> {
-        unsafe {
-            self.lock.lock_shared_async().await;
-            self.make_read_guard_unchecked()
-        }
+    async fn read_async(&self) -> ReadGuard<'_, T> {
+        self.lock.lock_shared_async().await;
+        self.make_read_guard()
     }
 
-    async fn write_async(&self) -> RwLockWriteGuard<'_, T> {
-        unsafe {
-            self.lock.lock_exclusive_async().await;
-            self.make_write_guard_unchecked()
-        }
+    async fn read_async_arc(self: &Arc<Self>) -> ArcReadGuard<T> {
+        self.lock.lock_shared_async().await;
+        self.make_arc_read_guard()
+    }
+
+    async fn write_async(&self) -> WriteGuard<'_, T> {
+        self.lock.lock_exclusive_async().await;
+        self.make_write_guard()
+    }
+
+    async fn write_async_arc(self: &Arc<Self>) -> ArcWriteGuard<T> {
+        self.lock.lock_exclusive_async().await;
+        self.make_arc_write_guard()
     }
 }
 
 trait IsRWLock<T: ?Sized> {
     fn get_lock(&self) -> &RwLock<T>;
+    fn raw(&self) -> &RawRwLock;
+    fn data(&self) -> &T;
 }
 
-impl<T> IsRWLock<T> for &RwLock<T>
+impl<'a, T> IsRWLock<T> for &'a RwLock<T>
 where
     T: ?Sized,
 {
     fn get_lock(&self) -> &RwLock<T> {
         self
+    }
+
+    fn raw(&self) -> &RawRwLock {
+        &self.lock
+    }
+
+    fn data(&self) -> &T {
+        &self.data
     }
 }
 
@@ -192,11 +265,19 @@ where
     fn get_lock(&self) -> &RwLock<T> {
         Arc::as_ref(self)
     }
+
+    fn raw(&self) -> &RawRwLock {
+        &self.lock
+    }
+
+    fn data(&self) -> &T {
+        &self.data
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{ReadGuard, RwLock, WriteGuard};
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha20Rng;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -485,7 +566,7 @@ mod tests {
                     let mut writer = x.write();
                     *writer += 1;
                     let cur_val = *writer;
-                    let reader = RwLockWriteGuard::downgrade(writer);
+                    let reader = WriteGuard::downgrade(writer);
                     assert_eq!(cur_val, *reader);
                 }
             }));

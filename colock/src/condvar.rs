@@ -1,7 +1,6 @@
 use crate::mutex::MutexGuard;
 use crate::raw_mutex::RawMutex;
 use event::Event;
-use lock_api::RawMutex as LockApiRawMutex;
 use std::cell::Cell;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
