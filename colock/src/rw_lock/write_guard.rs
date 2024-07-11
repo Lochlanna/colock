@@ -18,7 +18,7 @@ where
 {
     fn drop(&mut self) {
         unsafe {
-            self.lock.raw().unlock_exclusive();
+            self.rwlock().raw().unlock_exclusive();
         }
     }
 }
@@ -29,7 +29,7 @@ where
     L: IsRWLock<T>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.lock.data(), f)
+        Display::fmt(&self.rwlock().data(), f)
     }
 }
 
@@ -39,7 +39,7 @@ where
     L: IsRWLock<T>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        Debug::fmt(&self.lock.data(), f)
+        Debug::fmt(&self.rwlock().data(), f)
     }
 }
 
@@ -51,7 +51,7 @@ where
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.lock.data()
+        &self.rwlock().data()
     }
 }
 
@@ -62,7 +62,7 @@ where
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
-            ptr::from_ref(self.lock.data())
+            ptr::from_ref(self.rwlock().data())
                 .cast_mut()
                 .as_mut()
                 .expect("couldn't cast pointer to reference")
@@ -90,27 +90,27 @@ where
         F: FnOnce() -> U,
     {
         unsafe {
-            self.lock.raw().unlock_exclusive();
+            self.rwlock().raw().unlock_exclusive();
         }
         let result = f();
-        self.lock.raw().lock_exclusive();
+        self.rwlock().raw().lock_exclusive();
         result
     }
 
     pub fn unlock_fair(self) {
         unsafe {
-            self.lock.raw().unlock_exclusive_fair();
+            self.rwlock().raw().unlock_exclusive_fair();
         }
         forget(self);
     }
 }
 
-pub type WriteGuard<'a, T: ?Sized> = WriteGuardBase<T, &'a RwLock<T>>;
+pub type WriteGuard<'a, T> = WriteGuardBase<T, &'a RwLock<T>>;
 
 impl<'a, T> WriteGuard<'a, T> {
     pub fn downgrade(self) -> ReadGuard<'a, T> {
         let read_guard = unsafe {
-            self.lock.raw().downgrade();
+            self.rwlock().raw().downgrade();
             self.lock.make_read_guard_unchecked()
         };
         // skip calling the destructor
@@ -118,12 +118,12 @@ impl<'a, T> WriteGuard<'a, T> {
         read_guard
     }
 }
-pub type ArcWriteGuard<T: ?Sized> = WriteGuardBase<T, Arc<RwLock<T>>>;
+pub type ArcWriteGuard<T> = WriteGuardBase<T, Arc<RwLock<T>>>;
 
 impl<T> ArcWriteGuard<T> {
     pub fn downgrade(self) -> ArcReadGuard<T> {
         let read_guard = unsafe {
-            self.lock.raw().downgrade();
+            self.rwlock().raw().downgrade();
             self.lock.make_arc_read_guard_unchecked()
         };
         // skip calling the destructor

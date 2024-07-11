@@ -5,15 +5,39 @@ mod write_guard;
 
 use crate::raw_rw_lock::RawRwLock;
 pub use read_guard::*;
+use std::fmt::{Debug, Formatter};
 use std::ptr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 pub use write_guard::*;
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct RwLock<T: ?Sized> {
     lock: RawRwLock,
     data: T,
+}
+
+impl<T> Debug for RwLock<T>
+where
+    T: ?Sized + Debug,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let guard = self.try_read();
+        if let Some(guard) = guard {
+            f.debug_struct("RwLock").field("data", &&(*guard)).finish()
+        } else {
+            struct LockedPlaceholder;
+            impl Debug for LockedPlaceholder {
+                fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("<locked>")
+                }
+            }
+
+            f.debug_struct("RwLock")
+                .field("data", &LockedPlaceholder)
+                .finish()
+        }
+    }
 }
 
 impl<T> RwLock<T> {
@@ -28,7 +52,7 @@ impl<T> RwLock<T> {
         self.data
     }
 
-    pub fn from_raw(raw_rw_lock: RawRwLock, data: T) -> Self {
+    pub const fn from_raw(raw_rw_lock: RawRwLock, data: T) -> Self {
         Self {
             lock: raw_rw_lock,
             data,
@@ -40,14 +64,14 @@ impl<T> RwLock<T>
 where
     T: ?Sized,
 {
-    pub fn data_ptr(&self) -> *mut T {
+    pub const fn data_ptr(&self) -> *mut T {
         ptr::from_ref(&self.data).cast_mut()
     }
 
-    fn make_read_guard(&self) -> ReadGuard<'_, T> {
+    const fn make_read_guard(&self) -> ReadGuard<'_, T> {
         ReadGuard::new(self)
     }
-    pub unsafe fn make_read_guard_unchecked(&self) -> ReadGuard<'_, T> {
+    pub const unsafe fn make_read_guard_unchecked(&self) -> ReadGuard<'_, T> {
         self.make_read_guard()
     }
 
@@ -58,10 +82,10 @@ where
         self.make_arc_read_guard()
     }
 
-    fn make_write_guard(&self) -> WriteGuard<'_, T> {
+    const fn make_write_guard(&self) -> WriteGuard<'_, T> {
         WriteGuard::new(self)
     }
-    pub unsafe fn make_write_guard_unchecked(&self) -> WriteGuard<'_, T> {
+    pub const unsafe fn make_write_guard_unchecked(&self) -> WriteGuard<'_, T> {
         self.make_write_guard()
     }
 
@@ -187,7 +211,7 @@ where
     ///
     /// This method must only be called if the current thread logically owns a RwLockReadGuard but that guard has be discarded using `mem::forget`. Behavior is undefined if a rwlock is read-unlocked when not read-locked.
     pub unsafe fn force_unlock_read(&self) {
-        self.lock.unlock_shared()
+        self.lock.unlock_shared();
     }
 
     ///Forcibly unlocks a write lock.
@@ -197,7 +221,7 @@ where
     ///
     /// This method must only be called if the current thread logically owns a RwLockWriteGuard but that guard has be discarded using `mem::forget`. Behavior is undefined if a rwlock is write-unlocked when not write-locked.
     pub unsafe fn force_unlock_write(&self) {
-        self.lock.unlock_exclusive()
+        self.lock.unlock_exclusive();
     }
 
     ///Returns the underlying raw reader-writer lock object.
@@ -205,8 +229,16 @@ where
     /// Safety
     ///
     /// This method is unsafe because it allows unlocking a mutex while still holding a reference to a lock guard.
-    pub unsafe fn raw(&self) -> &RawRwLock {
+    pub const unsafe fn raw_lock(&self) -> &RawRwLock {
         &self.lock
+    }
+
+    const fn raw(&self) -> &RawRwLock {
+        &self.lock
+    }
+
+    const fn data(&self) -> &T {
+        &self.data
     }
 }
 
@@ -237,8 +269,6 @@ where
 
 trait IsRWLock<T: ?Sized> {
     fn get_lock(&self) -> &RwLock<T>;
-    fn raw(&self) -> &RawRwLock;
-    fn data(&self) -> &T;
 }
 
 impl<'a, T> IsRWLock<T> for &'a RwLock<T>
@@ -248,14 +278,6 @@ where
     fn get_lock(&self) -> &RwLock<T> {
         self
     }
-
-    fn raw(&self) -> &RawRwLock {
-        &self.lock
-    }
-
-    fn data(&self) -> &T {
-        &self.data
-    }
 }
 
 impl<T> IsRWLock<T> for Arc<RwLock<T>>
@@ -264,14 +286,6 @@ where
 {
     fn get_lock(&self) -> &RwLock<T> {
         Arc::as_ref(self)
-    }
-
-    fn raw(&self) -> &RawRwLock {
-        &self.lock
-    }
-
-    fn data(&self) -> &T {
-        &self.data
     }
 }
 

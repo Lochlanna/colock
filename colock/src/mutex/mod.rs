@@ -54,7 +54,7 @@ impl<T> Mutex<T>
 where
     T: ?Sized,
 {
-    pub fn data_ptr(&self) -> *mut T {
+    pub const fn data_ptr(&self) -> *mut T {
         core::ptr::from_ref(&self.data).cast_mut()
     }
 
@@ -110,7 +110,10 @@ where
         self.make_arc_guard()
     }
 
-    pub fn raw(&self) -> &RawMutex {
+    pub const unsafe fn raw_mutex(&self) -> &RawMutex {
+        &self.raw_mutex
+    }
+    const fn raw(&self) -> &RawMutex {
         &self.raw_mutex
     }
 
@@ -118,7 +121,7 @@ where
         self.make_guard()
     }
 
-    fn make_guard(&self) -> MutexGuard<'_, T> {
+    const fn make_guard(&self) -> MutexGuard<'_, T> {
         unsafe { MutexGuard::new(self) }
     }
 
@@ -132,6 +135,9 @@ where
 
     pub fn is_locked(&self) -> bool {
         self.raw().is_locked()
+    }
+    const fn data(&self) -> &T {
+        &self.data
     }
 }
 
@@ -182,10 +188,8 @@ where
     }
 }
 
-trait IsMutex<T: ?Sized> {
+pub trait IsMutex<T: ?Sized> {
     fn get_mutex(&self) -> &Mutex<T>;
-    fn raw(&self) -> &RawMutex;
-    fn data(&self) -> &T;
 }
 
 impl<T> IsMutex<T> for &Mutex<T>
@@ -195,14 +199,6 @@ where
     fn get_mutex(&self) -> &Mutex<T> {
         self
     }
-
-    fn raw(&self) -> &RawMutex {
-        &self.raw_mutex
-    }
-
-    fn data(&self) -> &T {
-        &self.data
-    }
 }
 
 impl<T> IsMutex<T> for Arc<Mutex<T>>
@@ -211,14 +207,6 @@ where
 {
     fn get_mutex(&self) -> &Mutex<T> {
         Arc::as_ref(self)
-    }
-
-    fn raw(&self) -> &RawMutex {
-        &self.raw_mutex
-    }
-
-    fn data(&self) -> &T {
-        &self.data
     }
 }
 

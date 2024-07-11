@@ -20,7 +20,7 @@ where
     M: IsMutex<T>,
 {
     fn drop(&mut self) {
-        unsafe { self.mutex.raw().unlock() }
+        unsafe { self.mutex().raw().unlock() }
     }
 }
 
@@ -32,7 +32,7 @@ where
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.mutex.data()
+        &self.mutex().data()
     }
 }
 
@@ -43,7 +43,7 @@ where
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
-            ptr::from_ref(self.mutex.data())
+            ptr::from_ref(self.mutex().data())
                 .cast_mut()
                 .as_mut()
                 .unwrap()
@@ -69,7 +69,7 @@ where
     M: IsMutex<T>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", &self.mutex.data())
+        write!(f, "{}", &self.mutex().data())
     }
 }
 
@@ -87,7 +87,7 @@ where
 {
     pub fn leak(self) -> &'l mut T {
         let mut_data_ref = unsafe {
-            ptr::from_ref(self.mutex.data())
+            ptr::from_ref(self.mutex().data())
                 .cast_mut()
                 .as_mut()
                 .unwrap()
@@ -111,6 +111,7 @@ where
     pub fn mutex(&self) -> &Mutex<T> {
         self.mutex.get_mutex()
     }
+
     //TODO test me...
     pub fn bump(&mut self) {
         unsafe { self.mutex().raw_mutex.bump() }

@@ -2,6 +2,7 @@ use crate::mutex::MutexGuard;
 use crate::raw_mutex::RawMutex;
 use event::Event;
 use std::cell::Cell;
+use std::ops::DerefMut;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
@@ -139,7 +140,7 @@ impl Condvar {
     }
 
     pub fn wait<T: ?Sized>(&self, guard: &mut MutexGuard<'_, T>) {
-        let mutex = unsafe { MutexGuard::mutex(guard).raw() };
+        let mutex = unsafe { MutexGuard::mutex(guard).raw_mutex() };
         debug_assert!(mutex.is_locked());
         let did_unlock = Cell::new(false);
         self.wait_queue
@@ -154,7 +155,7 @@ impl Condvar {
         guard: &mut MutexGuard<'_, T>,
         timeout: Instant,
     ) -> WaitTimeoutResult {
-        let mutex = unsafe { MutexGuard::mutex(guard).raw() };
+        let mutex = unsafe { MutexGuard::mutex(guard).raw_mutex() };
         debug_assert!(mutex.is_locked());
         let did_unlock = Cell::new(false);
         let result = !self.wait_queue.wait_while_until(
@@ -185,8 +186,8 @@ impl Condvar {
         guard: &mut MutexGuard<'_, T>,
         mut condition: impl FnMut(&mut T) -> bool,
     ) {
-        let mutex = unsafe { MutexGuard::mutex(guard).raw() };
-        while condition(&mut *guard) {
+        while condition(guard.deref_mut()) {
+            let mutex = unsafe { MutexGuard::mutex(guard).raw_mutex() };
             debug_assert!(mutex.is_locked());
             let did_unlock = Cell::new(false);
             self.wait_queue
@@ -203,8 +204,8 @@ impl Condvar {
         mut condition: impl FnMut(&mut T) -> bool,
         timeout: Instant,
     ) -> WaitTimeoutResult {
-        let mutex = unsafe { MutexGuard::mutex(guard).raw() };
-        while condition(&mut *guard) {
+        while condition(guard.deref_mut()) {
+            let mutex = unsafe { MutexGuard::mutex(guard).raw_mutex() };
             debug_assert!(mutex.is_locked());
             let did_unlock = Cell::new(false);
             let result = !self.wait_queue.wait_while_until(
@@ -233,7 +234,7 @@ impl Condvar {
     }
 
     pub async fn async_wait<T: ?Sized + Send>(&self, guard: &mut MutexGuard<'_, T>) {
-        let mutex = unsafe { MutexGuard::mutex(guard).raw() };
+        let mutex = unsafe { MutexGuard::mutex(guard).raw_mutex() };
         debug_assert!(mutex.is_locked());
         let did_unlock = AtomicBool::new(false);
         self.wait_queue
@@ -248,7 +249,7 @@ impl Condvar {
 #[cfg(test)]
 mod my_tests {
     use super::*;
-    use crate::mutex::{AsyncMutex, Mutex};
+    use crate::mutex::Mutex;
     use std::sync::Arc;
 
     #[test]

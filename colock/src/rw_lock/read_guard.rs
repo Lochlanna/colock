@@ -28,7 +28,7 @@ where
     L: IsRWLock<T>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.lock.data(), f)
+        Display::fmt(&self.rwlock().data(), f)
     }
 }
 
@@ -38,7 +38,7 @@ where
     L: IsRWLock<T>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        Debug::fmt(&self.lock.data(), f)
+        Debug::fmt(&self.rwlock().data(), f)
     }
 }
 
@@ -50,7 +50,7 @@ where
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.lock.data()
+        &self.rwlock().data()
     }
 }
 
@@ -76,16 +76,16 @@ where
         F: FnOnce() -> U,
     {
         unsafe {
-            self.lock.raw().unlock_shared();
+            self.rwlock().raw().unlock_shared();
         }
         let result = f();
-        self.lock.raw().lock_shared();
+        self.rwlock().raw().lock_shared();
         result
     }
 
     pub fn unlock_fair(self) {
         unsafe {
-            self.lock.raw().unlock_shared_fair();
+            self.rwlock().raw().unlock_shared_fair();
         }
         forget(self);
     }
@@ -95,20 +95,20 @@ where
         F: FnOnce() -> U,
     {
         unsafe {
-            self.lock.raw().unlock_shared_fair();
+            self.rwlock().raw().unlock_shared_fair();
         }
         let result = f();
-        self.lock.raw().lock_shared();
+        self.rwlock().raw().lock_shared();
         result
     }
 
     pub fn bump(&self) {
-        self.lock.raw().bump_shared();
+        self.rwlock().raw().bump_shared();
     }
 }
 
-pub type ReadGuard<'a, T: ?Sized> = ReadGuardBase<T, &'a RwLock<T>>;
-pub type ArcReadGuard<T: ?Sized> = ReadGuardBase<T, Arc<RwLock<T>>>;
+pub type ReadGuard<'a, T> = ReadGuardBase<T, &'a RwLock<T>>;
+pub type ArcReadGuard<T> = ReadGuardBase<T, Arc<RwLock<T>>>;
 
 //unit tests
 #[cfg(test)]
