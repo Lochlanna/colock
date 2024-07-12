@@ -87,6 +87,24 @@ impl Parker {
             }
         }
     }
+    
+    pub const fn waker(&self)->Waker {
+        Waker {
+            parker: self,
+        }
+    }
+}
+
+pub struct Waker {
+    parker: *const Parker
+}
+
+impl Waker {
+    pub fn wake(self) {
+        unsafe {
+            (*self.parker).unpark();
+        }
+    }
 }
 
 #[cfg(test)]

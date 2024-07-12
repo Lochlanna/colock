@@ -15,284 +15,166 @@
 mod atomic_const_ptr;
 mod spinwait;
 
-use spinwait::SpinWait;
 use std::cell::UnsafeCell;
-use std::fmt::Debug;
 use std::ops::{Deref, DerefMut};
-use std::ptr;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use parking::Parker;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use parking::{Parker, Waker};
 
-/// `LOCKED_BIT` is the bit that is set when the lock is locked
-const LOCKED_BIT: usize = 0b1;
-
-/// `PTR_MASK` is the mask that is used to get the pointer to the head of the queue
-const PTR_MASK: usize = !LOCKED_BIT;
-
-#[repr(align(2))]
 struct Node {
-    parker: Parker,
-    next: AtomicPtr<Self>,
+    next: *mut Self,
+    waker: Option<Waker>
 }
 
 impl Node {
-    /// Creates a new node with the given parker
-    const fn new(parker: Parker) -> Self {
+    const fn new(waker: Waker) -> Self {
         Self {
-            parker,
-            next: AtomicPtr::new(null_mut()),
+            next: null_mut(),
+            waker: Some(waker),
         }
     }
 }
 
-/// A small, light weight, unfair, FILO mutex that does not use any other locks including spin
-/// locks. It makes use of thread parking and thread yielding along with a FILO queue to provide
-/// a self contained priority inversion safe mutex.
-#[derive(Default)]
-pub struct MiniLock<T> {
-    /// The data that is protected by the mutex
-    data: UnsafeCell<T>,
-    /// A tagged pointer representing the head of the queue and the lock state
-    head: AtomicUsize,
+pub struct MiniLock<T>{
+    queue: AtomicPtr<Node>,
+    is_locked: AtomicBool,
+    data: UnsafeCell<T>
 }
 
-impl<T> Debug for MiniLock<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MiniLock")
-            .field("is_locked", &self.is_locked())
-            .finish()
-    }
-}
-
-// SAFETY: MiniLock provides the synchronization needed to access the data
-unsafe impl<T> Sync for MiniLock<T> where T: Send {}
-
-// SAFETY: MiniLock is safe to send as long as the data is safe to send
-unsafe impl<T> Send for MiniLock<T> where T: Send {}
+unsafe impl<T> Send for MiniLock<T> where T:Send {}
+unsafe impl<T> Sync for MiniLock<T> where T:Send {}
 
 impl<T> MiniLock<T> {
-    /// Creates a new `MiniLock` in an unlocked state ready for use.
-    pub const fn new(data: T) -> Self {
+    pub const fn new(data: T)-> Self {
         Self {
+            queue: AtomicPtr::new(null_mut()),
+            is_locked: AtomicBool::new(false),
             data: UnsafeCell::new(data),
-            head: AtomicUsize::new(0),
         }
     }
 
-    /// Pushes a node onto the queue.
-    ///
-    /// # Safety
-    /// It is always safe to push a node onto the queue as long as the node is guaranteed to live
-    /// long enough for it to be popped off and for the thread which pops it to be finished with it.
-    ///
-    /// As this is implemented in a mutex and the queue is used for parking it's guaranteed that when
-    /// a thread is woken the node has already been removed from the queue and the waking thread
-    /// is finished.
-    ///
-    /// If the thread wants to early out it must hold the lock to do so.
-    fn push(&self, node: &Node) {
-        let mut head = self.head.load(Ordering::Acquire);
-        loop {
-            node.next
-                .store((head & PTR_MASK) as *mut Node, Ordering::Relaxed);
-            let target = ptr::from_ref(node) as usize | (head & LOCKED_BIT);
-            if let Err(new_head) =
-                self.head
-                    .compare_exchange_weak(head, target, Ordering::Release, Ordering::Relaxed)
-            {
-                head = new_head;
-            } else {
-                return;
-            }
-        }
-    }
+    fn push(&self, node: &mut Node) {
+        assert_eq!(node.next, null_mut());
 
-    /// Removes a node from the queue no matter it's position.
-    ///
-    ///
-    /// # Safety
-    ///
-    /// The mutex must be have been locked by the thread that calls this function.
-    /// It is only safe for the holder of the lock to modify the queue
-    unsafe fn remove(&self, node: &Node) {
-        let node_ptr = node as *const Node;
-        debug_assert_eq!(self.head.load(Ordering::Acquire) & LOCKED_BIT, LOCKED_BIT);
-        let Err(head) = self.head.compare_exchange(
-            node_ptr as usize | LOCKED_BIT,
-            node.next.load(Ordering::Relaxed) as usize | LOCKED_BIT,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) else {
-            return;
-        };
-        let mut current_ptr = (head & PTR_MASK) as *mut Node;
-        debug_assert_ne!(current_ptr as usize, node_ptr as usize);
-        debug_assert!(!current_ptr.is_null());
-        debug_assert_eq!(head & LOCKED_BIT, LOCKED_BIT);
+        if let Err(mut head) = self.queue.compare_exchange(null_mut(), node, Ordering::AcqRel, Ordering::Acquire) {
+            loop {
+                node.next = head;
 
-        let mut prev = null_mut();
-        while current_ptr.cast_const() != node_ptr {
-            let current = unsafe { &*current_ptr };
-            prev = current_ptr;
-            current_ptr = current.next.load(Ordering::Relaxed);
-        }
-
-        debug_assert!(!prev.is_null());
-        unsafe {
-            (*prev)
-                .next
-                .store(node.next.load(Ordering::Relaxed), Ordering::Relaxed);
-        }
-    }
-
-    /// Pops the head off the queue.
-    /// Returns None if the queue is empty.
-    ///
-    ///
-    /// # Safety
-    ///
-    /// The mutex must be have been locked by the thread that calls this function.
-    /// It is only safe for the holder of the lock to modify the queue
-    unsafe fn pop(&self) -> Option<&Node> {
-        let mut head = self.head.load(Ordering::Relaxed);
-        debug_assert_eq!(head & LOCKED_BIT, LOCKED_BIT);
-        // this checks to see if the queue is empty as the pop function required the lock to be held
-        // meaning the locked bit will always be set. Therefore empty list == LOCKED_BIT
-        while head != LOCKED_BIT {
-            debug_assert_eq!(head & LOCKED_BIT, LOCKED_BIT);
-            let head_ptr = (head & PTR_MASK) as *mut Node;
-            debug_assert_ne!(head_ptr, null_mut());
-            // SAFETY: we know that the head is not null as we checked for that above
-            let head_ref = unsafe { &*head_ptr };
-            let next = head_ref.next.load(Ordering::Relaxed) as usize | LOCKED_BIT;
-            if let Err(new_head) =
-                self.head
-                    .compare_exchange_weak(head, next, Ordering::Relaxed, Ordering::Relaxed)
-            {
-                head = new_head;
-            } else {
-                return Some(head_ref);
-            }
-        }
-        // it's null
-        None
-    }
-
-    /// Locks the mutex and returns a guard that will unlock it when dropped.
-    ///
-    /// This function will always lock the lock and is not cancellable.
-    #[inline]
-    pub fn lock(&self) -> MiniLockGuard<T> {
-        let Err(head) =
-            self.head
-                .compare_exchange(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
-        else {
-            return MiniLockGuard { inner: self };
-        };
-        self.lock_slow(head)
-    }
-
-    /// Locks the mutex and returns a guard that will unlock it when dropped.
-    fn lock_slow(&self, mut head: usize) -> MiniLockGuard<T> {
-        let mut spin = SpinWait::<3, 7>::new();
-        while head & LOCKED_BIT == 0 || spin.spin() {
-            if let Err(new_head) = self.head.compare_exchange_weak(
-                head & !LOCKED_BIT,
-                head | LOCKED_BIT,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
-                head = new_head;
-            } else {
-                return MiniLockGuard { inner: self };
-            }
-        }
-        let parker = Parker::new();
-        let node = Node::new(parker);
-        if let Some(guard) = self.try_lock() {
-            return guard;
-        }
-        //push onto the queue
-        unsafe { node.parker.prepare_park() };
-        self.push(&node);
-
-        if let Some(guard) = self.try_lock() {
-            // SAFETY: we now hold the lock meaning that we are allowed to modify the queue
-            unsafe {
-                self.remove(&node);
-            }
-            return guard;
-        }
-
-        unsafe { node.parker.park() };
-        debug_assert_eq!(self.head.load(Ordering::Relaxed) & LOCKED_BIT, LOCKED_BIT);
-
-        MiniLockGuard { inner: self }
-    }
-
-    /// Attempts to acquire this lock without parking.
-    pub fn try_lock(&self) -> Option<MiniLockGuard<T>> {
-        let mut head = self.head.load(Ordering::Acquire);
-        if self.try_lock_internal(&mut head) {
-            return Some(MiniLockGuard { inner: self });
-        }
-        None
-    }
-
-    /// Attempts to acquire this lock without parking.
-    #[inline]
-    fn try_lock_internal(&self, head: &mut usize) -> bool {
-        while *head & LOCKED_BIT == 0 {
-            if let Err(new_head) = self.head.compare_exchange_weak(
-                *head,
-                *head | LOCKED_BIT,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
-                *head = new_head;
-            } else {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Unlocks the mutex.
-    ///
-    /// If there are waiting threads and it is able to re-acquire the lock it will
-    /// wake a thread and pass the lock on
-    ///
-    /// # Safety
-    /// It is only safe to call this function if the mutex is locked by the calling thread.
-    unsafe fn unlock(&self) -> bool {
-        loop {
-            let mut head = self.head.fetch_and(!LOCKED_BIT, Ordering::Release);
-
-            if head == LOCKED_BIT {
-                // there were no waiters
-                return false;
-            }
-            head &= !LOCKED_BIT;
-            if !self.try_lock_internal(&mut head) {
-                // the lock was already locked by another thread
-                return false;
-            }
-
-            if let Some(node) = self.pop() {
-                // we got a waiter!
-                // the lock is locked, we are passing it to the waking thread!
-                unsafe {
-                    node.parker.unpark();
+                match self.queue.compare_exchange(head, node, Ordering::AcqRel, Ordering::Acquire) {
+                    Err(new_head) => head = new_head,
+                    Ok(_) => return,
                 }
-                return true;
             }
         }
     }
 
-    /// Returns true if the mutex is locked
-    pub fn is_locked(&self) -> bool {
-        self.head.load(Ordering::Relaxed) & LOCKED_BIT == LOCKED_BIT
+    fn pop(&self)->Option<Waker> {
+        assert!(self.is_locked.load(Ordering::Acquire));
+
+        let mut head = self.queue.load(Ordering::Acquire);
+
+        while !head.is_null() {
+            let head_ref = unsafe {&mut *head};
+            let next = head_ref.next;
+            if let Err(new_head) = self.queue.compare_exchange(head, next, Ordering::Release, Ordering::Acquire) {
+                head = new_head;
+            } else {
+                // success!
+                return head_ref.waker.take()
+            }
+        }
+
+        None
+    }
+
+
+    fn remove_node(&self, node: &mut Node) {
+        assert!(self.is_locked.load(Ordering::Acquire));
+
+        node.waker = None;
+
+        let mut current_node = self.queue.load(Ordering::Acquire);
+        let mut previous_node = null_mut();
+        while !current_node.is_null() {
+            let current_ref = unsafe {&mut *current_node};
+            if current_node != node {
+                previous_node = current_node;
+                current_node = current_ref.next;
+            } else if previous_node.is_null() {
+                // we are popping the head
+                if let Err(new_head) = self.queue.compare_exchange(current_node, current_ref.next, Ordering::Release, Ordering::Acquire) {
+                    current_node = new_head;
+                } else {
+                    // success!
+                    return
+                }
+            } else {
+                // our node is not the head
+                debug_assert_eq!(current_node, node as *mut Node);
+                let previous_ref = unsafe {&mut *previous_node};
+                previous_ref.next = current_ref.next;
+                return
+            }
+        }
+    }
+
+
+    pub fn try_lock(&self)->Option<MiniLockGuard<T>> {
+        if self.is_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            return Some(MiniLockGuard {
+                inner: self,
+            })
+        }
+        None
+    }
+
+    pub fn unlock(&self) {
+        debug_assert!(self.is_locked.load(Ordering::Acquire));
+
+        loop {
+            let Some(waker) = self.pop() else {
+                self.is_locked.store(false, Ordering::Release);
+                if !self.queue.load(Ordering::Acquire).is_null() && self.is_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+                    // we re-acquired the lock and there is a node waiting!
+                    continue;
+                }
+                return;
+            };
+            self.is_locked.store(false, Ordering::Release);
+            waker.wake();
+            return;
+        }
+    }
+
+    pub fn lock(&self)->MiniLockGuard<T> {
+        loop {
+            if let Some(guard) = self.try_lock() {
+                return guard;
+            }
+
+            // we will push ourselves onto the queue and then sleep
+
+            let parker = Parker::new();
+            parker.prepare_park();
+            let mut node = Node::new(parker.waker());
+
+            if let Some(guard) = self.try_lock() {
+                return guard;
+            }
+
+            self.push(&mut node);
+
+            if let Some(guard) = self.try_lock() {
+                self.remove_node(&mut node);
+                return guard;
+            }
+
+            parker.park();
+        }
+    }
+
+    pub fn is_locked(&self)->bool {
+        self.is_locked.load(Ordering::Acquire)
     }
 }
 
@@ -344,7 +226,7 @@ mod tests {
                     let guard = mutex.lock();
                     barrier.wait();
                     thread::sleep(Duration::from_millis(50));
-                    while mutex.head.load(Ordering::Relaxed) & PTR_MASK == 0 {
+                    while mutex.queue.load(Ordering::Acquire).is_null() {
                         thread::yield_now();
                     }
                     drop(guard);
