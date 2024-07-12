@@ -15,7 +15,6 @@
 mod atomic_const_ptr;
 mod spinwait;
 
-use parking::{ThreadParker, ThreadParkerT};
 use spinwait::SpinWait;
 use std::cell::UnsafeCell;
 use std::fmt::Debug;
@@ -23,6 +22,7 @@ use std::ops::{Deref, DerefMut};
 use std::ptr;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use parking::Parker;
 
 /// `LOCKED_BIT` is the bit that is set when the lock is locked
 const LOCKED_BIT: usize = 0b1;
@@ -32,13 +32,13 @@ const PTR_MASK: usize = !LOCKED_BIT;
 
 #[repr(align(2))]
 struct Node {
-    parker: ThreadParker,
+    parker: Parker,
     next: AtomicPtr<Self>,
 }
 
 impl Node {
     /// Creates a new node with the given parker
-    const fn new(parker: ThreadParker) -> Self {
+    const fn new(parker: Parker) -> Self {
         Self {
             parker,
             next: AtomicPtr::new(null_mut()),
@@ -208,41 +208,27 @@ impl<T> MiniLock<T> {
                 return MiniLockGuard { inner: self };
             }
         }
-        Self::with_node(|node| {
-            if let Some(guard) = self.try_lock() {
-                return guard;
-            }
-            //push onto the queue
-            unsafe { node.parker.prepare_park() };
-            self.push(node);
-
-            if let Some(guard) = self.try_lock() {
-                // SAFETY: we now hold the lock meaning that we are allowed to modify the queue
-                unsafe {
-                    self.remove(node);
-                }
-                return guard;
-            }
-
-            unsafe { node.parker.park() };
-            debug_assert_eq!(self.head.load(Ordering::Relaxed) & LOCKED_BIT, LOCKED_BIT);
-
-            MiniLockGuard { inner: self }
-        })
-    }
-
-    /// Executes the given function with a node.
-    /// The node might be constructed or it might be a thread local.
-    #[inline]
-    fn with_node<R>(f: impl FnOnce(&Node) -> R) -> R {
-        if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
-            let node = Node::new(ThreadParker::const_new());
-            return f(&node);
+        let parker = Parker::new();
+        let node = Node::new(parker);
+        if let Some(guard) = self.try_lock() {
+            return guard;
         }
-        thread_local! {
-            static NODE: Node = const {Node::new(ThreadParker::const_new())};
+        //push onto the queue
+        unsafe { node.parker.prepare_park() };
+        self.push(&node);
+
+        if let Some(guard) = self.try_lock() {
+            // SAFETY: we now hold the lock meaning that we are allowed to modify the queue
+            unsafe {
+                self.remove(&node);
+            }
+            return guard;
         }
-        NODE.with(f)
+
+        unsafe { node.parker.park() };
+        debug_assert_eq!(self.head.load(Ordering::Relaxed) & LOCKED_BIT, LOCKED_BIT);
+
+        MiniLockGuard { inner: self }
     }
 
     /// Attempts to acquire this lock without parking.

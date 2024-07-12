@@ -8,13 +8,91 @@
 
 mod thread_parker;
 
+use std::fmt::{Debug, Formatter};
+use std::time::Instant;
 pub use thread_parker::thread_yield;
-pub use thread_parker::{ThreadParker, ThreadParkerT};
+use crate::thread_parker::{ThreadParker, ThreadParkerT};
+
+pub enum Parker {
+    Owned(ThreadParker),
+    Ref(&'static ThreadParker),
+}
+
+impl Debug for Parker {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ThreadParker")
+    }
+}
+
+impl Default for Parker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Parker {
+    pub fn new() -> Self {
+        if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
+            return Self::Owned(ThreadParker::const_new())
+        }
+
+        thread_local! {
+            static HANDLE: ThreadParker = const {ThreadParker::const_new()}
+        }
+        HANDLE.with(|handle| {
+            unsafe {Self::Ref(core::mem::transmute(handle))}
+        })
+    }
+
+    pub fn prepare_park(&self) {
+        match self {
+            Self::Owned(thread_parker) => {
+                unsafe {thread_parker.prepare_park()}
+            }
+            Self::Ref(thread_parker) => {
+                unsafe {thread_parker.prepare_park()}
+            }
+        }
+    }
+
+    pub fn park(&self) {
+        match self {
+            Self::Owned(thread_parker) => {
+                unsafe {thread_parker.park()}
+            }
+            Self::Ref(thread_parker) => {
+                unsafe {thread_parker.park()}
+            }
+        }
+    }
+
+    pub fn park_until(&self, instant: Instant) -> bool {
+        match self {
+            Self::Owned(thread_parker) => {
+                unsafe {thread_parker.park_until(instant)}
+            }
+            Self::Ref(thread_parker) => {
+                unsafe {thread_parker.park_until(instant)}
+            }
+        }
+    }
+
+    pub fn unpark(&self) {
+        match self {
+            Self::Owned(thread_parker) => {
+                unsafe {thread_parker.unpark()}
+            }
+            Self::Ref(thread_parker) => {
+                unsafe {thread_parker.unpark()}
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ThreadParker, ThreadParkerT};
+    use crate::thread_parker::{ThreadParker, ThreadParkerT};
     use std::time::{Duration, Instant};
 
     #[test]

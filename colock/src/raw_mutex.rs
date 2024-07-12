@@ -1,14 +1,50 @@
 use crate::spinwait;
 use core::sync::atomic::{AtomicU8, Ordering};
-use event::Event;
+use std::ops::Deref;
+use std::pin::pin;
+use std::task::Waker;
+use intrusive_list::{ConcurrentIntrusiveList, Error};
+use parking::Parker;
 
+const UNLOCKED: u8 = 0;
 const LOCKED_BIT: u8 = 0b1;
 const WAIT_BIT: u8 = 0b10;
 const FAIR_BIT: u8 = 0b100;
 
+
+//TODO naming here is weird...
+#[derive(Debug)]
+pub enum MaybeAsync {
+    Parker(Parker),
+    Waker(Waker)
+}
+
+impl MaybeAsync {
+    fn prepare_park(&self) {
+        match self {
+            MaybeAsync::Parker(p) => p.prepare_park(),
+            MaybeAsync::Waker(w) => { }
+        }
+    }
+    
+    fn park(&self) {
+        match self {
+            MaybeAsync::Parker(p) => p.park(),
+            MaybeAsync::Waker(w) => {}
+        }
+    }
+    
+    fn wake(self) {
+        match self {
+            MaybeAsync::Parker(p) => p.unpark(),
+            MaybeAsync::Waker(w) => w.wake()
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct RawMutex {
-    queue: Event,
+    queue: ConcurrentIntrusiveList<MaybeAsync>,
     state: AtomicU8,
 }
 
@@ -22,188 +58,74 @@ impl RawMutex {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            queue: Event::new(),
-            state: AtomicU8::new(0),
+            queue: ConcurrentIntrusiveList::new(),
+            state: AtomicU8::new(UNLOCKED),
         }
     }
 
     /// Returns a reference to the queue used by this mutex.
     /// This is for testing hence the pub(crate) visibility.
-    pub(crate) const fn queue(&self) -> &Event {
+    pub(crate) const fn queue(&self) -> &ConcurrentIntrusiveList<MaybeAsync> {
         &self.queue
     }
 
-    fn attempt_lock(&self, state: &mut u8) -> bool {
-        match self.state.compare_exchange_weak(
-            *state,
-            *state | LOCKED_BIT,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => true,
-            Err(new_state) => {
-                *state = new_state;
-                false
-            }
-        }
-    }
-
-    #[inline]
-    fn try_lock_once(&self, state: &mut u8) -> bool {
-        while *state & LOCKED_BIT == 0 {
-            if self.attempt_lock(state) {
-                return true;
-            }
-        }
-        false
-    }
-
-    #[inline]
-    fn try_lock_spin(&self, state: &mut u8) -> bool {
-        let mut spin_wait = spinwait::SpinWait::<4, 7>::new();
-        while spin_wait.spin() {
-            if *state & LOCKED_BIT == 0 {
-                if self.attempt_lock(state) {
-                    return true;
-                }
-            } else {
-                *state = self.state.load(Ordering::Relaxed);
-            }
-        }
-        false
-    }
-
-    const fn should_sleep(&self) -> impl Fn(usize) -> bool + '_ {
-        |_| {
-            let mut state = self.state.load(Ordering::Relaxed);
-            loop {
-                const FAIR_LOCKED: u8 = LOCKED_BIT | FAIR_BIT;
-                let (target, ordering) = match state {
-                    0 => (LOCKED_BIT, Ordering::Acquire),
-                    LOCKED_BIT => (LOCKED_BIT | WAIT_BIT, Ordering::Relaxed),
-                    WAIT_BIT => (LOCKED_BIT | WAIT_BIT, Ordering::Acquire),
-                    FAIR_LOCKED => (FAIR_BIT | LOCKED_BIT | WAIT_BIT, Ordering::Relaxed),
-                    _ => {
-                        // locked and waiting / fair unlock
-                        debug_assert!(
-                            state == (LOCKED_BIT | WAIT_BIT) || state == (FAIR_LOCKED | WAIT_BIT)
-                        );
-                        return true;
-                    }
-                };
-                match self
-                    .state
-                    .compare_exchange_weak(state, target, ordering, Ordering::Relaxed)
-                {
-                    Ok(_) => {
-                        if state & LOCKED_BIT == 0 {
-                            // we got the lock!
-                            return false;
-                        }
-                        // we registered to wait!
-                        return true;
-                    }
-                    Err(new_state) => state = new_state,
-                }
-            }
-        }
-    }
-
-    const fn should_wake_spin(&self) -> impl Fn() -> bool + '_ {
-        || {
-            let mut state = self.state.load(Ordering::Relaxed);
-            if state & FAIR_BIT == FAIR_BIT {
-                // we are fair unlocking
-                let old = self.state.fetch_and(!FAIR_BIT, Ordering::Relaxed);
-                debug_assert_eq!(old & !WAIT_BIT, LOCKED_BIT | FAIR_BIT);
-                return true;
-            }
-            self.try_lock_spin(&mut state)
-        }
-    }
-
-    const fn should_wake(&self) -> impl Fn() -> bool + '_ {
-        || {
-            let mut state = self.state.load(Ordering::Relaxed);
-            if state & FAIR_BIT == FAIR_BIT {
-                // we are fair unlocking
-                let old = self.state.fetch_and(!FAIR_BIT, Ordering::Relaxed);
-                debug_assert_eq!(old & !WAIT_BIT, LOCKED_BIT | FAIR_BIT);
-                return true;
-            }
-            self.try_lock_once(&mut state)
-        }
-    }
-
-    const fn conditional_notify(&self) -> impl Fn(usize) -> bool + '_ {
-        |num_waiters_left| {
-            let state = self.state.load(Ordering::Relaxed);
-            if state & LOCKED_BIT != 0 {
-                //the lock has already been locked by someone else don't bother waking a thread
-                return false;
-            }
-            if num_waiters_left == 1 {
-                self.state.fetch_and(!WAIT_BIT, Ordering::Relaxed);
-            }
-            true
-        }
-    }
-
-    const fn fair_conditional_notify(&self) -> impl Fn(usize) -> bool + '_ {
-        |num_waiters_left| {
-            if num_waiters_left == 1 {
-                self.state.store(LOCKED_BIT | FAIR_BIT, Ordering::Relaxed);
-            } else {
-                self.state
-                    .store(WAIT_BIT | LOCKED_BIT | FAIR_BIT, Ordering::Relaxed);
-            }
-            true
-        }
-    }
-
     pub async fn lock_async(&self) {
-        let Err(mut state) =
-            self.state
-                .compare_exchange_weak(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
-        else {
-            return;
-        };
-        // try lock once is slightly smarter in that it will set current correctly and spin only while the lock is unlocked!
-        if self.try_lock_once(&mut state) {
-            return;
-        }
-        // use try on wake rather than spin try on wake
-        self.queue
-            .wait_while_async(self.should_sleep(), self.should_wake())
-            .await;
+        todo!()
     }
-}
 
-impl RawMutex {
     #[inline]
     pub fn lock(&self) {
-        let Err(mut state) =
-            self.state
-                .compare_exchange_weak(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
-        else {
-            return;
-        };
-        if self.try_lock_spin(&mut state) {
-            return;
+        loop {
+            if self.try_lock() {
+                return;
+            }
+            let parker = Parker::new();
+            parker.prepare_park();
+            let parker = MaybeAsync::Parker(parker);
+            let mut node = ConcurrentIntrusiveList::make_node(parker);
+            let pinned_node = pin!(node);
+            let (park_result, _, _) = self.queue.push_head(pinned_node, |_, _|{
+                let mut current_state = self.state.load(Ordering::Acquire);
+                while current_state != (LOCKED_BIT | WAIT_BIT) {
+                   if current_state & LOCKED_BIT == 0 {
+                       if let Err(new_state) = self.state.compare_exchange(current_state, current_state | LOCKED_BIT, Ordering::Acquire, Ordering::Acquire) {
+                           current_state = new_state;
+                       } else {
+                           // we got the lock abort the push
+                           return (false, ());
+                       }
+                   } else {
+                       debug_assert!(current_state == LOCKED_BIT);
+                       current_state = self.state.compare_exchange(LOCKED_BIT, LOCKED_BIT | WAIT_BIT, Ordering::AcqRel, Ordering::Acquire).unwrap_or_else(|u|u);
+                   }
+                }
+                (true, ())
+            }, |parker|{
+                parker.park();
+            });
+            if let Err(park_error) = park_result {
+                if park_error == Error::AbortedPush {
+                    //we got the lock
+                    return;
+                }
+                panic!("The node was dirty");
+            }
         }
-        self.queue
-            .wait_while(self.should_sleep(), self.should_wake_spin());
     }
 
     #[inline]
     pub fn try_lock(&self) -> bool {
-        let Err(mut state) =
-            self.state
-                .compare_exchange_weak(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
-        else {
+        let Err(mut state) = self.state.compare_exchange(UNLOCKED, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed) else {
             return true;
         };
-        self.try_lock_once(&mut state)
+        while state & LOCKED_BIT == 0 {
+            if let Err(new_state) = self.state.compare_exchange(state, state | LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed) {
+                state = new_state;
+            } else {
+                return true;
+            }
+        }
+        false
     }
 
     #[inline]
@@ -212,59 +134,36 @@ impl RawMutex {
         if state & WAIT_BIT == 0 {
             return;
         }
-
-        self.queue.notify_if(self.conditional_notify(), || {
-            //clear the wait bit
-            self.state.fetch_and(!WAIT_BIT, Ordering::Relaxed);
+        // there is a thread waiting!
+        self.queue.pop_tail(|parker, num_waiting|{
+            parker.wake();
+            if num_waiting == 0 {
+                self.state.fetch_and(!WAIT_BIT, Ordering::Release);
+            }
         });
     }
 
     pub fn is_locked(&self) -> bool {
-        self.state.load(Ordering::Relaxed) & LOCKED_BIT != 0
+        self.state.load(Ordering::Acquire) & LOCKED_BIT == LOCKED_BIT
     }
 
     pub unsafe fn unlock_fair(&self) {
-        self.queue.notify_if(self.fair_conditional_notify(), || {
-            //unlock from within the queue lock
-            self.state.store(0, Ordering::Release);
-        });
+        todo!()
     }
 
     pub unsafe fn bump(&self) {
-        if self.state.load(Ordering::Acquire) & WAIT_BIT == 0 {
-            return;
-        }
-        let on_empty = || {
-            self.state.store(LOCKED_BIT, Ordering::Release);
-        };
-        if self
-            .queue
-            .notify_if(self.fair_conditional_notify(), on_empty)
-        {
-            self.lock();
+        if self.state.load(Ordering::Acquire) == (LOCKED_BIT | WAIT_BIT) {
+            self.unlock();
+            self.lock()
         }
     }
 
     pub fn try_lock_for(&self, timeout: core::time::Duration) -> bool {
-        if let Some(timeout) = std::time::Instant::now().checked_add(timeout) {
-            return self.try_lock_until(timeout);
-        }
-        self.lock();
-        true
+        todo!()
     }
 
     pub fn try_lock_until(&self, timeout: std::time::Instant) -> bool {
-        let Err(mut state) =
-            self.state
-                .compare_exchange_weak(0, LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed)
-        else {
-            return true;
-        };
-        if self.try_lock_spin(&mut state) {
-            return true;
-        }
-        self.queue
-            .wait_while_until(self.should_sleep(), self.should_wake_spin(), timeout)
+        todo!()
     }
 }
 
@@ -284,7 +183,7 @@ mod tests {
                 for _ in 0..num_iterations {
                     mutex.lock();
                     barrier.wait();
-                    while mutex.queue.num_waiting() == 0 {
+                    while mutex.queue.count() == 0 {
                         thread::yield_now();
                     }
                     thread::sleep(Duration::from_millis(5));
@@ -329,7 +228,7 @@ mod tests {
                 for _ in 0..num_iterations {
                     mutex.lock_async().await;
                     barrier.wait().await;
-                    while mutex.queue.num_waiting() == 0 {
+                    while mutex.queue.count() == 0 {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
                     tokio::time::sleep(Duration::from_millis(5)).await;

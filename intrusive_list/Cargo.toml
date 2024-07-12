@@ -3,10 +3,5 @@ name = "intrusive_list"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-mini_lock = { path = "../mini_lock" }
-
-[dev-dependencies]
-itertools = "0.12.1"
+mini_lock = {path = "../mini_lock"}

@@ -231,7 +231,7 @@ mod tests {
                 for _ in 0..num_iterations {
                     let guard = mutex.lock();
                     barrier.wait();
-                    while unsafe { mutex.raw() }.queue().num_waiting() == 0 {
+                    while unsafe { mutex.raw() }.queue().count() == 0 {
                         thread::yield_now();
                     }
                     thread::sleep(Duration::from_millis(5));
@@ -261,7 +261,7 @@ mod tests {
                 for _ in 0..num_iterations {
                     let guard = mutex.lock_async().await;
                     barrier.wait().await;
-                    while unsafe { mutex.raw() }.queue().num_waiting() == 0 {
+                    while unsafe { mutex.raw() }.queue().count() == 0 {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
                     tokio::time::sleep(Duration::from_millis(5)).await;

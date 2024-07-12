@@ -6,7 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-event = { path = "../event" }
+intrusive_list = { path = "../intrusive_list" }
+parking = {path = "../parking"}
 
 [dev-dependencies]
 itertools = "0.13.0"
