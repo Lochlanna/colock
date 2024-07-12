@@ -2,7 +2,6 @@
 
 use crate::Run;
 use async_trait::async_trait;
-use colock::mutex::AsyncMutex;
 use criterion::black_box;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

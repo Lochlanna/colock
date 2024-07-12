@@ -355,7 +355,7 @@ where
         }
         this.list_token
             .fast_modify_payload(|handle| {
-                handle.handle = Some(MaybeRef::Owned(Handle::Async(cx.waker().clone())))
+                handle.handle = Some(MaybeRef::Owned(Handle::Async(cx.waker().clone())));
             })
             .expect("node is already on queue we cannot use fast modify here!");
 
