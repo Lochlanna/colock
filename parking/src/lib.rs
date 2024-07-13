@@ -88,18 +88,18 @@ impl Parker {
         }
     }
     
-    pub const fn waker(&self)->Waker {
-        Waker {
+    pub const fn waker(&self)-> ThreadWaker {
+        ThreadWaker {
             parker: self,
         }
     }
 }
 
-pub struct Waker {
+pub struct ThreadWaker {
     parker: *const Parker
 }
 
-impl Waker {
+impl ThreadWaker {
     pub fn wake(self) {
         unsafe {
             (*self.parker).unpark();

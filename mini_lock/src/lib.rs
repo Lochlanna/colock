@@ -14,30 +14,54 @@
 
 mod atomic_const_ptr;
 mod spinwait;
-
 use std::cell::UnsafeCell;
 use std::ops::{Deref, DerefMut};
+use std::ptr;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use parking::{Parker, Waker};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, fence, Ordering};
+use parking::{Parker, ThreadWaker};
 
+
+const LOCKED_BIT: usize = 0b1;
+const PTR_MASK: usize = !LOCKED_BIT;
+
+trait Tagged {
+    fn get_ptr(&self)->*mut Node;
+    fn get_flag(&self)->bool;
+}
+
+impl Tagged for usize {
+    fn get_ptr(&self) -> *mut Node {
+        (*self & PTR_MASK) as *mut Node
+    }
+
+    fn get_flag(&self) -> bool {
+        (*self & LOCKED_BIT) == LOCKED_BIT
+    }
+}
+
+
+#[repr(align(2))]
 struct Node {
     next: *mut Self,
-    waker: Option<Waker>
+    waker: Option<ThreadWaker>
 }
 
 impl Node {
-    const fn new(waker: Waker) -> Self {
+    const fn new(waker: ThreadWaker) -> Self {
         Self {
             next: null_mut(),
             waker: Some(waker),
         }
     }
+
+    fn as_usize_ptr(&self)->usize {
+        ptr::from_ref(self) as usize
+    }
 }
 
 pub struct MiniLock<T>{
-    queue: AtomicPtr<Node>,
-    is_locked: AtomicBool,
+    head: AtomicUsize,
     data: UnsafeCell<T>
 }
 
@@ -47,8 +71,7 @@ unsafe impl<T> Sync for MiniLock<T> where T:Send {}
 impl<T> MiniLock<T> {
     pub const fn new(data: T)-> Self {
         Self {
-            queue: AtomicPtr::new(null_mut()),
-            is_locked: AtomicBool::new(false),
+            head: AtomicUsize::new(0),
             data: UnsafeCell::new(data),
         }
     }
@@ -56,11 +79,11 @@ impl<T> MiniLock<T> {
     fn push(&self, node: &mut Node) {
         assert_eq!(node.next, null_mut());
 
-        if let Err(mut head) = self.queue.compare_exchange(null_mut(), node, Ordering::AcqRel, Ordering::Acquire) {
+        if let Err(mut head) = self.head.compare_exchange(LOCKED_BIT, node.as_usize_ptr() | LOCKED_BIT, Ordering::AcqRel, Ordering::Acquire) {
             loop {
-                node.next = head;
+                node.next = (head & PTR_MASK) as *mut Node;
 
-                match self.queue.compare_exchange(head, node, Ordering::AcqRel, Ordering::Acquire) {
+                match self.head.compare_exchange(head, node.as_usize_ptr() | (head & LOCKED_BIT), Ordering::AcqRel, Ordering::Acquire) {
                     Err(new_head) => head = new_head,
                     Ok(_) => return,
                 }
@@ -68,15 +91,15 @@ impl<T> MiniLock<T> {
         }
     }
 
-    fn pop(&self)->Option<Waker> {
-        assert!(self.is_locked.load(Ordering::Acquire));
+    fn pop(&self)->Option<ThreadWaker> {
+        assert!(self.is_locked());
 
-        let mut head = self.queue.load(Ordering::Acquire);
+        let mut head = self.head.load(Ordering::Acquire);
 
-        while !head.is_null() {
-            let head_ref = unsafe {&mut *head};
+        while head != LOCKED_BIT {
+            let head_ref = unsafe {&mut *head.get_ptr()};
             let next = head_ref.next;
-            if let Err(new_head) = self.queue.compare_exchange(head, next, Ordering::Release, Ordering::Acquire) {
+            if let Err(new_head) = self.head.compare_exchange(head, next as usize | LOCKED_BIT, Ordering::Release, Ordering::Acquire) {
                 head = new_head;
             } else {
                 // success!
@@ -89,12 +112,12 @@ impl<T> MiniLock<T> {
 
 
     fn remove_node(&self, node: &mut Node) {
-        assert!(self.is_locked.load(Ordering::Acquire));
+        assert!(self.is_locked());
 
         node.waker = None;
 
-        let mut current_node = self.queue.load(Ordering::Acquire);
-        let mut previous_node = null_mut();
+        let mut current_node = self.head.load(Ordering::Acquire).get_ptr();
+        let mut previous_node: *mut Node = null_mut();
         while !current_node.is_null() {
             let current_ref = unsafe {&mut *current_node};
             if current_node != node {
@@ -102,8 +125,8 @@ impl<T> MiniLock<T> {
                 current_node = current_ref.next;
             } else if previous_node.is_null() {
                 // we are popping the head
-                if let Err(new_head) = self.queue.compare_exchange(current_node, current_ref.next, Ordering::Release, Ordering::Acquire) {
-                    current_node = new_head;
+                if let Err(new_head) = self.head.compare_exchange(current_node as usize | LOCKED_BIT, current_ref.next as usize | LOCKED_BIT, Ordering::Release, Ordering::Acquire) {
+                    current_node = new_head.get_ptr();
                 } else {
                     // success!
                     return
@@ -120,7 +143,12 @@ impl<T> MiniLock<T> {
 
 
     pub fn try_lock(&self)->Option<MiniLockGuard<T>> {
-        if self.is_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+        let Err(head) = self.head.compare_exchange(0, LOCKED_BIT, Ordering::Acquire, Ordering::Acquire) else {
+            return Some(MiniLockGuard {
+                inner: self,
+            })
+        };
+        if self.head.compare_exchange(head & PTR_MASK, head | LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed).is_ok() {
             return Some(MiniLockGuard {
                 inner: self,
             })
@@ -129,52 +157,57 @@ impl<T> MiniLock<T> {
     }
 
     pub fn unlock(&self) {
-        debug_assert!(self.is_locked.load(Ordering::Acquire));
+        debug_assert!(self.is_locked());
 
         loop {
-            let Some(waker) = self.pop() else {
-                self.is_locked.store(false, Ordering::Release);
-                if !self.queue.load(Ordering::Acquire).is_null() && self.is_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-                    // we re-acquired the lock and there is a node waiting!
-                    continue;
-                }
+            if self.head.compare_exchange(LOCKED_BIT, 0, Ordering::Release, Ordering::Acquire).is_ok() {
                 return;
-            };
-            self.is_locked.store(false, Ordering::Release);
-            waker.wake();
-            return;
+            }
+            // there are waiting nodes to be popped!
+            if let Some(waker) = self.pop() {
+                // pass the lock
+                fence(Ordering::Release);
+                waker.wake();
+                return;
+            }
         }
+        
     }
 
     pub fn lock(&self)->MiniLockGuard<T> {
-        loop {
-            if let Some(guard) = self.try_lock() {
-                return guard;
-            }
+        if let Some(guard) = self.try_lock() {
+            return guard;
+        }
 
-            // we will push ourselves onto the queue and then sleep
+        // we will push ourselves onto the queue and then sleep
 
-            let parker = Parker::new();
-            parker.prepare_park();
-            let mut node = Node::new(parker.waker());
+        let parker = Parker::new();
+        parker.prepare_park();
+        let mut node = Node::new(parker.waker());
 
-            if let Some(guard) = self.try_lock() {
-                return guard;
-            }
+        if let Some(guard) = self.try_lock() {
+            return guard;
+        }
 
-            self.push(&mut node);
+        self.push(&mut node);
 
-            if let Some(guard) = self.try_lock() {
-                self.remove_node(&mut node);
-                return guard;
-            }
+        if let Some(guard) = self.try_lock() {
+            self.remove_node(&mut node);
+            return guard;
+        }
 
-            parker.park();
+        parker.park();
+        // if we wake up the lock has been passed to us!
+        fence(Ordering::Acquire);
+        debug_assert!(self.is_locked());
+        
+        MiniLockGuard {
+            inner: self,
         }
     }
 
     pub fn is_locked(&self)->bool {
-        self.is_locked.load(Ordering::Acquire)
+        self.head.load(Ordering::Acquire).get_flag()
     }
 }
 
@@ -226,7 +259,7 @@ mod tests {
                     let guard = mutex.lock();
                     barrier.wait();
                     thread::sleep(Duration::from_millis(50));
-                    while mutex.queue.load(Ordering::Acquire).is_null() {
+                    while mutex.head.load(Ordering::Acquire).get_ptr().is_null() {
                         thread::yield_now();
                     }
                     drop(guard);
@@ -266,7 +299,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn lots_and_lots() {
-        const J: u64 = 1_0000_000;
+        const J: u64 = 1_0000_0;
         // const J: u64 = 10000000;
         // const J: u64 = 50000000;
         const K: u64 = 6;

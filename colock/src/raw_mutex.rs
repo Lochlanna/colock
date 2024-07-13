@@ -3,8 +3,9 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use std::ops::Deref;
 use std::pin::pin;
 use std::task::Waker;
+use std::thread::park;
 use intrusive_list::{ConcurrentIntrusiveList, Error};
-use parking::Parker;
+use parking::{Parker, ThreadWaker};
 
 const UNLOCKED: u8 = 0;
 const LOCKED_BIT: u8 = 0b1;
@@ -15,28 +16,14 @@ const FAIR_BIT: u8 = 0b100;
 //TODO naming here is weird...
 #[derive(Debug)]
 pub enum MaybeAsync {
-    Parker(Parker),
+    Parker(ThreadWaker),
     Waker(Waker)
 }
 
 impl MaybeAsync {
-    fn prepare_park(&self) {
-        match self {
-            MaybeAsync::Parker(p) => p.prepare_park(),
-            MaybeAsync::Waker(w) => { }
-        }
-    }
-    
-    fn park(&self) {
-        match self {
-            MaybeAsync::Parker(p) => p.park(),
-            MaybeAsync::Waker(w) => {}
-        }
-    }
-    
     fn wake(self) {
         match self {
-            MaybeAsync::Parker(p) => p.unpark(),
+            MaybeAsync::Parker(p) => p.wake(),
             MaybeAsync::Waker(w) => w.wake()
         }
     }
@@ -81,10 +68,12 @@ impl RawMutex {
             }
             let parker = Parker::new();
             parker.prepare_park();
-            let parker = MaybeAsync::Parker(parker);
-            let mut node = ConcurrentIntrusiveList::make_node(parker);
+            let waker = MaybeAsync::Parker(parker.waker());
+            
+            let mut node = ConcurrentIntrusiveList::make_node(waker);
             let pinned_node = pin!(node);
-            let (park_result, _, _) = self.queue.push_head(pinned_node, |_, _|{
+            
+            let (park_result, _) = self.queue.push_head(pinned_node, |_, _|{
                 let mut current_state = self.state.load(Ordering::Acquire);
                 while current_state != (LOCKED_BIT | WAIT_BIT) {
                    if current_state & LOCKED_BIT == 0 {
@@ -100,9 +89,8 @@ impl RawMutex {
                    }
                 }
                 (true, ())
-            }, |parker|{
-                parker.park();
             });
+            
             if let Err(park_error) = park_result {
                 if park_error == Error::AbortedPush {
                     //we got the lock
@@ -110,6 +98,7 @@ impl RawMutex {
                 }
                 panic!("The node was dirty");
             }
+            parker.park();
         }
     }
 
@@ -135,8 +124,8 @@ impl RawMutex {
             return;
         }
         // there is a thread waiting!
-        self.queue.pop_tail(|parker, num_waiting|{
-            parker.wake();
+        self.queue.pop_tail(|waker, num_waiting|{
+            waker.wake();
             if num_waiting == 0 {
                 self.state.fetch_and(!WAIT_BIT, Ordering::Release);
             }

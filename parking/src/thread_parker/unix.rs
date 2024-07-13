@@ -25,7 +25,7 @@ type tv_nsec_t = libc::c_long;
 
 // Helper type for putting a thread to sleep until some other thread wakes it up
 pub struct ThreadParker {
-    should_park: Cell<bool>,
+    should_park: Cell<u8>,
     mutex: UnsafeCell<libc::pthread_mutex_t>,
     condvar: UnsafeCell<libc::pthread_cond_t>,
     initialized: Cell<bool>,
@@ -34,7 +34,7 @@ pub struct ThreadParker {
 impl ThreadParker {
     pub const fn const_new() -> Self {
         Self {
-            should_park: Cell::new(false),
+            should_park: Cell::new(0),
             mutex: UnsafeCell::new(libc::PTHREAD_MUTEX_INITIALIZER),
             condvar: UnsafeCell::new(libc::PTHREAD_COND_INITIALIZER),
             initialized: Cell::new(false),
@@ -52,7 +52,7 @@ impl super::ThreadParkerT for ThreadParker {
 
     #[inline]
     unsafe fn prepare_park(&self) {
-        self.should_park.set(true);
+        self.should_park.set(42);
         if !self.initialized.get() {
             self.init();
             self.initialized.set(true);
@@ -69,14 +69,14 @@ impl super::ThreadParkerT for ThreadParker {
         let should_park = self.should_park.get();
         let r = libc::pthread_mutex_unlock(self.mutex.get());
         debug_assert_eq!(r, 0);
-        should_park
+        should_park == 42
     }
 
     #[inline]
     unsafe fn park(&self) {
         let r = libc::pthread_mutex_lock(self.mutex.get());
         debug_assert_eq!(r, 0);
-        while self.should_park.get() {
+        while self.should_park.get() == 42 {
             let r = libc::pthread_cond_wait(self.condvar.get(), self.mutex.get());
             debug_assert_eq!(r, 0);
         }
@@ -88,7 +88,7 @@ impl super::ThreadParkerT for ThreadParker {
     unsafe fn park_until(&self, timeout: Instant) -> bool {
         let r = libc::pthread_mutex_lock(self.mutex.get());
         debug_assert_eq!(r, 0);
-        while self.should_park.get() {
+        while self.should_park.get() == 42 {
             let now = Instant::now();
             if timeout <= now {
                 let r = libc::pthread_mutex_unlock(self.mutex.get());
@@ -121,7 +121,7 @@ impl super::ThreadParkerT for ThreadParker {
     unsafe fn unpark(&self) {
         let r = libc::pthread_mutex_lock(self.mutex.get());
         debug_assert_eq!(r, 0);
-        self.should_park.set(false);
+        self.should_park.set(0);
 
         // We notify while holding the lock here to avoid races with the target
         // thread. In particular, the thread could exit after we unlock the

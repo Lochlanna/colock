@@ -70,7 +70,7 @@ impl<D> ConcurrentIntrusiveList<D> {
         }
     }
 
-    pub fn push_head<F, R, FP, RP>(&self, node: Pin<&mut Node<D>>, critical_condition: F, on_success: FP) -> (Result<usize, Error>, R, Option<RP>) where F: FnOnce(&mut D, usize)->(bool, R), FP: FnOnce(&mut D)-> RP {
+    pub fn push_head<F, R>(&self, node: Pin<&mut Node<D>>, critical_condition: F) -> (Result<usize, Error>, R) where F: FnOnce(&mut D, usize)->(bool, R) {
         let node = unsafe {node.get_unchecked_mut()};
         let data = node.data.as_mut().expect("there is no data in the node");
         let push_result;
@@ -80,16 +80,14 @@ impl<D> ConcurrentIntrusiveList<D> {
             let should_push;
             (should_push, critical_result) = critical_condition(data, list.count);
             if !should_push {
-                return (Err(Error::AbortedPush), critical_result, None);
+                return (Err(Error::AbortedPush), critical_result);
             }
             push_result = list.push_head(node, self);
         }
-        let data = node.data.as_mut().expect("there is no data in the node");
-        let fp = Some(on_success(data));
-        (push_result, critical_result, fp)
+        (push_result, critical_result)
     }
 
-    pub fn push_tail<F, R, FP, RP>(&self, node: Pin<&mut Node<D>>, critical_condition: F, on_success: FP) -> (Result<usize, Error>, R, Option<RP>) where F: FnOnce(&mut D, usize)->(bool, R), FP: FnOnce(&mut D)-> RP {
+    pub fn push_tail<F, R>(&self, node: Pin<&mut Node<D>>, critical_condition: F) -> (Result<usize, Error>, R) where F: FnOnce(&mut D, usize)->(bool, R) {
         let node = unsafe {node.get_unchecked_mut()};
         let data = node.data.as_mut().expect("there is no data in the node");
         let push_result;
@@ -99,13 +97,11 @@ impl<D> ConcurrentIntrusiveList<D> {
             let should_push;
             (should_push, critical_result) = critical_condition(data, list.count);
             if !should_push {
-                return (Err(Error::AbortedPush), critical_result, None);
+                return (Err(Error::AbortedPush), critical_result);
             }
             push_result = list.push_tail(node, self);
         }
-        let data = node.data.as_mut().expect("there is no data in the node");
-        let fp = Some(on_success(data));
-        (push_result, critical_result, fp)
+        (push_result, critical_result)
     }
 
     pub fn pop_head<F, R>(&self, critical_condition: F) -> Option<(R, usize)> where F: FnOnce(D, usize)->R {
