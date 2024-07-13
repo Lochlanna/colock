@@ -124,6 +124,18 @@ impl<D> ConcurrentIntrusiveList<D> {
         Some((critical_result, list.count))
     }
 
+
+    /// Pop all elements without dropping the lock. This should be faster than looping with pop_tail
+    pub fn pop_all<F>(&self, critical_condition: F, critical_on_empty: impl FnOnce()) -> usize  where F: Fn(D, usize) {
+        let mut list = self.inner_list.lock();
+        let num_popped = list.count;
+        while let Some(data) = list.pop_tail() {
+            critical_condition(data, list.count);
+        }
+        critical_on_empty();
+        num_popped
+    }
+
     pub fn count(&self)->usize {
         self.inner_list.lock().count
     }

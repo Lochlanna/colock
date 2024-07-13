@@ -12,3 +12,4 @@ pub mod raw_mutex;
 mod raw_rw_lock;
 pub mod rw_lock;
 mod spinwait;
+mod maybe_async;

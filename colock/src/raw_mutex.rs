@@ -1,11 +1,12 @@
 use core::sync::atomic::{AtomicU8, Ordering};
-use std::future::{Future};
+use std::future::Future;
 use std::ops::{Add, Deref};
 use std::pin::{pin, Pin};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use intrusive_list::{ConcurrentIntrusiveList, Error, Node};
-use parking::{Parker, ThreadParker, ThreadParkerT, ThreadWaker};
+use parking::{Parker, ThreadParker, ThreadParkerT};
+use crate::maybe_async::MaybeAsync;
 
 const UNLOCKED: u8 = 0;
 const LOCKED_BIT: u8 = 0b1;
@@ -26,22 +27,6 @@ impl Timeout for Instant {
 impl Timeout for Duration {
     fn to_instant(&self) -> Instant {
         Instant::now().add(self.clone())
-    }
-}
-
-//TODO naming here is weird...
-#[derive(Debug)]
-pub enum MaybeAsync {
-    Parker(ThreadWaker),
-    Waker(Waker)
-}
-
-impl MaybeAsync {
-    fn wake(self) {
-        match self {
-            MaybeAsync::Parker(p) => p.wake(),
-            MaybeAsync::Waker(w) => w.wake()
-        }
     }
 }
 
