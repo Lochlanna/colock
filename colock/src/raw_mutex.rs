@@ -1,11 +1,10 @@
-use crate::spinwait;
 use core::sync::atomic::{AtomicU8, Ordering};
+use std::future::{Future};
 use std::ops::{Add, Deref};
-use std::pin::pin;
-use std::task::Waker;
-use std::thread::park;
+use std::pin::{pin, Pin};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
-use intrusive_list::{ConcurrentIntrusiveList, Error};
+use intrusive_list::{ConcurrentIntrusiveList, Error, Node};
 use parking::{Parker, ThreadParker, ThreadParkerT, ThreadWaker};
 
 const UNLOCKED: u8 = 0;
@@ -73,8 +72,11 @@ impl RawMutex {
         &self.queue
     }
 
-    pub async fn lock_async(&self) {
-        todo!()
+    pub const fn lock_async(&self) -> RawMutexPoller {
+        RawMutexPoller {
+            raw_mutex: self,
+            node: None,
+        }
     }
 
     fn get_parker()-> Parker {
@@ -109,21 +111,7 @@ impl RawMutex {
             let pinned_node = pin!(node);
 
             let (park_result, _) = self.queue.push_head(pinned_node, |_, _|{
-                let mut current_state = self.state.load(Ordering::Acquire);
-                while current_state != (LOCKED_BIT | WAIT_BIT) {
-                    if current_state & LOCKED_BIT == 0 {
-                        if let Err(new_state) = self.state.compare_exchange(current_state, current_state | LOCKED_BIT, Ordering::Acquire, Ordering::Acquire) {
-                            current_state = new_state;
-                        } else {
-                            // we got the lock abort the push
-                            return (false, ());
-                        }
-                    } else {
-                        debug_assert!(current_state == LOCKED_BIT);
-                        current_state = self.state.compare_exchange(LOCKED_BIT, LOCKED_BIT | WAIT_BIT, Ordering::AcqRel, Ordering::Acquire).unwrap_or_else(|u|u);
-                    }
-                }
-                (true, ())
+                self.should_sleep()
             });
 
             if let Err(park_error) = park_result {
@@ -147,6 +135,24 @@ impl RawMutex {
                 return true;
             }
         }
+    }
+
+    fn should_sleep(&self) -> (bool, ()) {
+        let mut current_state = self.state.load(Ordering::Acquire);
+        while current_state != (LOCKED_BIT | WAIT_BIT) {
+            if current_state & LOCKED_BIT == 0 {
+                if let Err(new_state) = self.state.compare_exchange(current_state, current_state | LOCKED_BIT, Ordering::Acquire, Ordering::Acquire) {
+                    current_state = new_state;
+                } else {
+                    // we got the lock abort the push
+                    return (false, ());
+                }
+            } else {
+                debug_assert!(current_state == LOCKED_BIT);
+                current_state = self.state.compare_exchange(LOCKED_BIT, LOCKED_BIT | WAIT_BIT, Ordering::AcqRel, Ordering::Acquire).unwrap_or_else(|u| u);
+            }
+        }
+        (true, ())
     }
 
     #[inline]
@@ -209,6 +215,40 @@ impl RawMutex {
 
     pub fn try_lock_until(&self, timeout: std::time::Instant) -> bool {
         self.lock_inner(Some(timeout))
+    }
+}
+
+
+pub struct RawMutexPoller<'a> {
+    raw_mutex: &'a RawMutex,
+    node:Option<Node<MaybeAsync>>
+}
+unsafe impl<'a> Send for RawMutexPoller<'a> {}
+impl<'a> Future for RawMutexPoller<'a> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.raw_mutex.try_lock() {
+            return Poll::Ready(())
+        }
+        let self_mut = unsafe {self.get_unchecked_mut()};
+        let waker = MaybeAsync::Waker(cx.waker().clone());
+        let node = self_mut.node.insert(ConcurrentIntrusiveList::make_node(waker));
+        let node = unsafe {Pin::new_unchecked(node)};
+
+        let (park_result, _) = self_mut.raw_mutex.queue.push_head(node, |_, _|{
+            self_mut.raw_mutex.should_sleep()
+        });
+
+        if let Err(park_error) = park_result {
+            if park_error == Error::AbortedPush {
+                //we got the lock
+                return Poll::Ready(());
+            }
+            panic!("The node was dirty");
+        }
+
+        Poll::Pending
     }
 }
 
@@ -328,6 +368,7 @@ mod tests {
                 did_lock = true;
             }
             () = tokio::time::sleep(Duration::from_millis(150)) => {
+                assert_eq!(mutex.queue.count(), 0);
                 did_lock = false;
             }
         }
