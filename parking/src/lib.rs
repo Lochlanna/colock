@@ -28,7 +28,7 @@ impl Parker {
     pub fn new_owned(thread_parker: ThreadParker) -> Self {
         Self::Owned(thread_parker)
     }
-    
+
     pub fn new_ref(thread_parker: &'static ThreadParker) -> Self {
         Self::Ref(thread_parker)
     }

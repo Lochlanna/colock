@@ -1,9 +1,10 @@
 use crate::spinwait;
 use core::sync::atomic::{AtomicU8, Ordering};
-use std::ops::Deref;
+use std::ops::{Add, Deref};
 use std::pin::pin;
 use std::task::Waker;
 use std::thread::park;
+use std::time::{Duration, Instant};
 use intrusive_list::{ConcurrentIntrusiveList, Error};
 use parking::{Parker, ThreadParker, ThreadParkerT, ThreadWaker};
 
@@ -12,6 +13,22 @@ const LOCKED_BIT: u8 = 0b1;
 const WAIT_BIT: u8 = 0b10;
 const FAIR_BIT: u8 = 0b100;
 
+
+trait Timeout {
+    fn to_instant(&self)->Instant;
+}
+
+impl Timeout for Instant {
+    fn to_instant(&self) -> Instant {
+        self.clone()
+    }
+}
+
+impl Timeout for Duration {
+    fn to_instant(&self) -> Instant {
+        Instant::now().add(self.clone())
+    }
+}
 
 //TODO naming here is weird...
 #[derive(Debug)]
@@ -75,43 +92,60 @@ impl RawMutex {
 
     #[inline]
     pub fn lock(&self) {
+        self.lock_inner::<Instant>(None);
+    }
+
+
+    fn lock_inner<T:Timeout>(&self, timeout: Option<T>) -> bool {
         loop {
             if self.try_lock() {
-                return;
+                return true;
             }
             let parker = Self::get_parker();
             parker.prepare_park();
             let waker = MaybeAsync::Parker(parker.waker());
-            
+
             let mut node = ConcurrentIntrusiveList::make_node(waker);
             let pinned_node = pin!(node);
-            
+
             let (park_result, _) = self.queue.push_head(pinned_node, |_, _|{
                 let mut current_state = self.state.load(Ordering::Acquire);
                 while current_state != (LOCKED_BIT | WAIT_BIT) {
-                   if current_state & LOCKED_BIT == 0 {
-                       if let Err(new_state) = self.state.compare_exchange(current_state, current_state | LOCKED_BIT, Ordering::Acquire, Ordering::Acquire) {
-                           current_state = new_state;
-                       } else {
-                           // we got the lock abort the push
-                           return (false, ());
-                       }
-                   } else {
-                       debug_assert!(current_state == LOCKED_BIT);
-                       current_state = self.state.compare_exchange(LOCKED_BIT, LOCKED_BIT | WAIT_BIT, Ordering::AcqRel, Ordering::Acquire).unwrap_or_else(|u|u);
-                   }
+                    if current_state & LOCKED_BIT == 0 {
+                        if let Err(new_state) = self.state.compare_exchange(current_state, current_state | LOCKED_BIT, Ordering::Acquire, Ordering::Acquire) {
+                            current_state = new_state;
+                        } else {
+                            // we got the lock abort the push
+                            return (false, ());
+                        }
+                    } else {
+                        debug_assert!(current_state == LOCKED_BIT);
+                        current_state = self.state.compare_exchange(LOCKED_BIT, LOCKED_BIT | WAIT_BIT, Ordering::AcqRel, Ordering::Acquire).unwrap_or_else(|u|u);
+                    }
                 }
                 (true, ())
             });
-            
+
             if let Err(park_error) = park_result {
                 if park_error == Error::AbortedPush {
                     //we got the lock
-                    return;
+                    return true;
                 }
                 panic!("The node was dirty");
             }
-            parker.park();
+            if let Some(timeout) = &timeout {
+                if !parker.park_until(timeout.to_instant()) {
+                    return false;
+                }
+            } else {
+                parker.park();
+            }
+
+            if self.state.load(Ordering::Acquire) & FAIR_BIT != 0 {
+                // it was fairly handed to us!
+                self.state.fetch_and(!FAIR_BIT, Ordering::Relaxed);
+                return true;
+            }
         }
     }
 
@@ -142,7 +176,7 @@ impl RawMutex {
             if num_waiting == 0 {
                 self.state.fetch_and(!WAIT_BIT, Ordering::Release);
             }
-        });
+        }, ||{});
     }
 
     pub fn is_locked(&self) -> bool {
@@ -150,7 +184,16 @@ impl RawMutex {
     }
 
     pub unsafe fn unlock_fair(&self) {
-        todo!()
+        // there is a thread waiting!
+        self.queue.pop_tail(|waker, num_waiting|{
+            if num_waiting == 0 {
+                debug_assert!(self.state.load(Ordering::Acquire) & WAIT_BIT == WAIT_BIT);
+                self.state.fetch_xor(WAIT_BIT | FAIR_BIT, Ordering::Release);
+            } else {
+                self.state.fetch_or(FAIR_BIT, Ordering::Relaxed);
+            }
+            waker.wake();
+        }, || { self.state.fetch_and(!LOCKED_BIT, Ordering::Release); });
     }
 
     pub unsafe fn bump(&self) {
@@ -161,11 +204,11 @@ impl RawMutex {
     }
 
     pub fn try_lock_for(&self, timeout: core::time::Duration) -> bool {
-        todo!()
+        self.lock_inner(Some(timeout))
     }
 
     pub fn try_lock_until(&self, timeout: std::time::Instant) -> bool {
-        todo!()
+        self.lock_inner(Some(timeout))
     }
 }
 

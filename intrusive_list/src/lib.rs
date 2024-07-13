@@ -104,16 +104,22 @@ impl<D> ConcurrentIntrusiveList<D> {
         (push_result, critical_result)
     }
 
-    pub fn pop_head<F, R>(&self, critical_condition: F) -> Option<(R, usize)> where F: FnOnce(D, usize)->R {
+    pub fn pop_head<F, R>(&self, critical_condition: F, critical_on_empty: impl FnOnce()) -> Option<(R, usize)> where F: FnOnce(D, usize)->R {
         let mut list = self.inner_list.lock();
-        let data = list.pop_head()?;
+        let Some(data) = list.pop_head() else {
+            critical_on_empty();
+            return None;
+        };
         let critical_result = critical_condition(data, list.count);
         Some((critical_result, list.count))
     }
 
-    pub fn pop_tail<F, R>(&self, critical_condition: F) -> Option<(R, usize)> where F: FnOnce(D, usize)->R {
+    pub fn pop_tail<F, R>(&self, critical_condition: F, critical_on_empty: impl FnOnce()) -> Option<(R, usize)> where F: FnOnce(D, usize)->R {
         let mut list = self.inner_list.lock();
-        let data = list.pop_tail()?;
+        let Some(data) = list.pop_tail() else {
+            critical_on_empty();
+            return None;
+        };
         let critical_result = critical_condition(data, list.count);
         Some((critical_result, list.count))
     }
