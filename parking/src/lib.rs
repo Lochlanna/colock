@@ -11,7 +11,7 @@ mod thread_parker;
 use std::fmt::{Debug, Formatter};
 use std::time::Instant;
 pub use thread_parker::thread_yield;
-use crate::thread_parker::{ThreadParker, ThreadParkerT};
+pub use thread_parker::{ThreadParker, ThreadParkerT};
 
 pub enum Parker {
     Owned(ThreadParker),
@@ -24,24 +24,13 @@ impl Debug for Parker {
     }
 }
 
-impl Default for Parker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Parker {
-    pub fn new() -> Self {
-        if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
-            return Self::Owned(ThreadParker::const_new())
-        }
-
-        thread_local! {
-            static HANDLE: ThreadParker = const {ThreadParker::const_new()}
-        }
-        HANDLE.with(|handle| {
-            unsafe {Self::Ref(core::mem::transmute(handle))}
-        })
+    pub fn new_owned(thread_parker: ThreadParker) -> Self {
+        Self::Owned(thread_parker)
+    }
+    
+    pub fn new_ref(thread_parker: &'static ThreadParker) -> Self {
+        Self::Ref(thread_parker)
     }
 
     pub fn prepare_park(&self) {
@@ -95,6 +84,7 @@ impl Parker {
     }
 }
 
+#[derive(Debug)]
 pub struct ThreadWaker {
     parker: *const Parker
 }

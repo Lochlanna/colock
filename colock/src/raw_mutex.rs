@@ -5,7 +5,7 @@ use std::pin::pin;
 use std::task::Waker;
 use std::thread::park;
 use intrusive_list::{ConcurrentIntrusiveList, Error};
-use parking::{Parker, ThreadWaker};
+use parking::{Parker, ThreadParker, ThreadParkerT, ThreadWaker};
 
 const UNLOCKED: u8 = 0;
 const LOCKED_BIT: u8 = 0b1;
@@ -60,13 +60,26 @@ impl RawMutex {
         todo!()
     }
 
+    fn get_parker()-> Parker {
+        if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
+            return Parker::Owned(ThreadParker::const_new())
+        }
+
+        thread_local! {
+            static HANDLE: ThreadParker = const {ThreadParker::const_new()}
+        }
+        HANDLE.with(|handle| {
+            unsafe {Parker::Ref(core::mem::transmute(handle))}
+        })
+    }
+
     #[inline]
     pub fn lock(&self) {
         loop {
             if self.try_lock() {
                 return;
             }
-            let parker = Parker::new();
+            let parker = Self::get_parker();
             parker.prepare_park();
             let waker = MaybeAsync::Parker(parker.waker());
             

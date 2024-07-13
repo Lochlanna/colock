@@ -19,7 +19,7 @@ use std::ops::{Deref, DerefMut};
 use std::ptr;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, fence, Ordering};
-use parking::{Parker, ThreadWaker};
+use parking::{Parker, ThreadParker, ThreadParkerT, ThreadWaker};
 
 
 const LOCKED_BIT: usize = 0b1;
@@ -76,37 +76,6 @@ impl<T> MiniLock<T> {
         }
     }
 
-    fn push(&self, node: &mut Node) {
-        assert_eq!(node.next, null_mut());
-
-        if let Err(mut head) = self.head.compare_exchange(LOCKED_BIT, node.as_usize_ptr() | LOCKED_BIT, Ordering::AcqRel, Ordering::Acquire) {
-            loop {
-                node.next = (head & PTR_MASK) as *mut Node;
-
-                match self.head.compare_exchange(head, node.as_usize_ptr() | (head & LOCKED_BIT), Ordering::AcqRel, Ordering::Acquire) {
-                    Err(new_head) => head = new_head,
-                    Ok(_) => return,
-                }
-            }
-        }
-    }
-
-    fn push_if_locked(&self, node: &mut Node) -> bool {
-        assert_eq!(node.next, null_mut());
-
-        if let Err(mut head) = self.head.compare_exchange(LOCKED_BIT, node.as_usize_ptr() | LOCKED_BIT, Ordering::AcqRel, Ordering::Acquire) {
-            while head.get_flag() { // while locked
-                node.next = (head & PTR_MASK) as *mut Node;
-
-                match self.head.compare_exchange(head, node.as_usize_ptr() | LOCKED_BIT, Ordering::AcqRel, Ordering::Acquire) {
-                    Err(new_head) => head = new_head,
-                    Ok(_) => return true,
-                }
-            }
-            return false
-        }
-        true
-    }
 
     fn push_or_lock(&self, node: &mut Node) -> bool {
         assert_eq!(node.next, null_mut());
@@ -147,37 +116,6 @@ impl<T> MiniLock<T> {
         }
 
         None
-    }
-
-
-    fn remove_node(&self, node: &mut Node) {
-        assert!(self.is_locked());
-
-        node.waker = None;
-
-        let mut current_node = self.head.load(Ordering::Acquire).get_ptr();
-        let mut previous_node: *mut Node = null_mut();
-        while !current_node.is_null() {
-            let current_ref = unsafe {&mut *current_node};
-            if current_node != node {
-                previous_node = current_node;
-                current_node = current_ref.next;
-            } else if previous_node.is_null() {
-                // we are popping the head
-                if let Err(new_head) = self.head.compare_exchange(current_node as usize | LOCKED_BIT, current_ref.next as usize | LOCKED_BIT, Ordering::Release, Ordering::Acquire) {
-                    current_node = new_head.get_ptr();
-                } else {
-                    // success!
-                    return
-                }
-            } else {
-                // our node is not the head
-                debug_assert_eq!(current_node, node as *mut Node);
-                let previous_ref = unsafe {&mut *previous_node};
-                previous_ref.next = current_ref.next;
-                return
-            }
-        }
     }
 
 
@@ -222,13 +160,9 @@ impl<T> MiniLock<T> {
 
             // we will push ourselves onto the queue and then sleep
 
-            let parker = Parker::new();
+            let parker = Self::get_parker();
             parker.prepare_park();
             let mut node = Node::new(parker.waker());
-
-            if let Some(guard) = self.try_lock() {
-                return guard;
-            }
 
             if self.push_or_lock(&mut node) {
                 return MiniLockGuard {
@@ -241,6 +175,19 @@ impl<T> MiniLock<T> {
 
     pub fn is_locked(&self)->bool {
         self.head.load(Ordering::Acquire).get_flag()
+    }
+
+    fn get_parker()-> Parker {
+        if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
+            return Parker::Owned(ThreadParker::const_new())
+        }
+
+        thread_local! {
+            static HANDLE: ThreadParker = const {ThreadParker::const_new()}
+        }
+        HANDLE.with(|handle| {
+            unsafe {Parker::Ref(core::mem::transmute(handle))}
+        })
     }
 }
 
