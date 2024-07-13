@@ -91,6 +91,45 @@ impl<T> MiniLock<T> {
         }
     }
 
+    fn push_if_locked(&self, node: &mut Node) -> bool {
+        assert_eq!(node.next, null_mut());
+
+        if let Err(mut head) = self.head.compare_exchange(LOCKED_BIT, node.as_usize_ptr() | LOCKED_BIT, Ordering::AcqRel, Ordering::Acquire) {
+            while head.get_flag() { // while locked
+                node.next = (head & PTR_MASK) as *mut Node;
+
+                match self.head.compare_exchange(head, node.as_usize_ptr() | LOCKED_BIT, Ordering::AcqRel, Ordering::Acquire) {
+                    Err(new_head) => head = new_head,
+                    Ok(_) => return true,
+                }
+            }
+            return false
+        }
+        true
+    }
+
+    fn push_or_lock(&self, node: &mut Node) -> bool {
+        assert_eq!(node.next, null_mut());
+
+        if let Err(mut head) = self.head.compare_exchange(0, LOCKED_BIT, Ordering::Acquire, Ordering::Acquire) {
+            loop {
+                node.next = (head & PTR_MASK) as *mut Node;
+                if head.get_flag() {
+                    match self.head.compare_exchange(head, node.as_usize_ptr() | LOCKED_BIT, Ordering::AcqRel, Ordering::Acquire) {
+                        Err(new_head) => head = new_head,
+                        Ok(_) => return false, // we didn't lock the lock, but we did push the node
+                    }
+                } else {
+                    match self.head.compare_exchange(head, head | LOCKED_BIT, Ordering::Acquire, Ordering::Acquire) {
+                        Err(new_head) => head = new_head,
+                        Ok(_) => return true, // we locked the lock
+                    }
+                }
+            }
+        }
+        true
+    }
+
     fn pop(&self)->Option<ThreadWaker> {
         assert!(self.is_locked());
 
@@ -165,8 +204,9 @@ impl<T> MiniLock<T> {
             }
             // there are waiting nodes to be popped!
             if let Some(waker) = self.pop() {
-                // pass the lock
-                fence(Ordering::Release);
+                // unlock the lock
+                self.head.fetch_and(PTR_MASK, Ordering::Release);
+                // wake the thread!
                 waker.wake();
                 return;
             }
@@ -175,34 +215,28 @@ impl<T> MiniLock<T> {
     }
 
     pub fn lock(&self)->MiniLockGuard<T> {
-        if let Some(guard) = self.try_lock() {
-            return guard;
-        }
+        loop {
+            if let Some(guard) = self.try_lock() {
+                return guard;
+            }
 
-        // we will push ourselves onto the queue and then sleep
+            // we will push ourselves onto the queue and then sleep
 
-        let parker = Parker::new();
-        parker.prepare_park();
-        let mut node = Node::new(parker.waker());
+            let parker = Parker::new();
+            parker.prepare_park();
+            let mut node = Node::new(parker.waker());
 
-        if let Some(guard) = self.try_lock() {
-            return guard;
-        }
-
-        self.push(&mut node);
-
-        if let Some(guard) = self.try_lock() {
-            self.remove_node(&mut node);
-            return guard;
-        }
-
-        parker.park();
-        // if we wake up the lock has been passed to us!
-        fence(Ordering::Acquire);
-        debug_assert!(self.is_locked());
-        
-        MiniLockGuard {
-            inner: self,
+            if let Some(guard) = self.try_lock() {
+                return guard;
+            }
+            
+            while !self.push_if_locked(&mut node) {
+                if let Some(guard) = self.try_lock() {
+                    return guard;
+                }
+                node.next = null_mut();
+            }
+            parker.park();
         }
     }
 
@@ -299,7 +333,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn lots_and_lots() {
-        const J: u64 = 1_0000_0;
+        const J: u64 = 1_0000_000;
         // const J: u64 = 10000000;
         // const J: u64 = 50000000;
         const K: u64 = 6;
