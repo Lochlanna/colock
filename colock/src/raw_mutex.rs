@@ -6,29 +6,13 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use intrusive_list::{ConcurrentIntrusiveList, Error, Node};
 use parking::{Parker, ThreadParker, ThreadParkerT};
-use crate::maybe_async::MaybeAsync;
+use crate::lock_utils::MaybeAsync;
 
 const UNLOCKED: u8 = 0;
 const LOCKED_BIT: u8 = 0b1;
 const WAIT_BIT: u8 = 0b10;
 const FAIR_BIT: u8 = 0b100;
 
-
-trait Timeout {
-    fn to_instant(&self)->Instant;
-}
-
-impl Timeout for Instant {
-    fn to_instant(&self) -> Instant {
-        self.clone()
-    }
-}
-
-impl Timeout for Duration {
-    fn to_instant(&self) -> Instant {
-        Instant::now().add(self.clone())
-    }
-}
 
 #[derive(Debug)]
 pub struct RawMutex {
@@ -83,7 +67,7 @@ impl RawMutex {
     }
 
 
-    fn lock_inner<T:Timeout>(&self, timeout: Option<T>) -> bool {
+    fn lock_inner<T:crate::lock_utils::Timeout>(&self, timeout: Option<T>) -> bool {
         loop {
             if self.try_lock() {
                 return true;

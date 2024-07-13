@@ -1,8 +1,10 @@
 use core::sync::atomic::AtomicUsize;
+use std::pin::pin;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use intrusive_list::ConcurrentIntrusiveList;
-use crate::maybe_async::MaybeAsync;
+use intrusive_list::{ConcurrentIntrusiveList, Error};
+use parking::{Parker, ThreadParker, ThreadParkerT};
+use crate::lock_utils::{MaybeAsync, Timeout};
 const UNLOCKED: usize = 0;
 const EXCLUSIVE_LOCK: usize = 0b1;
 const EXCLUSIVE_WAITING: usize = 0b10;
@@ -18,7 +20,7 @@ trait State: Copy {
 
 impl State for usize {
     fn is_shared_locked(self) -> bool {
-        self & ONE_READER == ONE_READER && self & EXCLUSIVE_LOCK == 0
+        self.num_shared() > 0 && self & EXCLUSIVE_LOCK == 0
     }
 
     fn is_exclusive_locked(self) -> bool {
@@ -68,8 +70,63 @@ impl RawRwLock {
         todo!()
     }
 
+    fn get_parker()-> Parker {
+        if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
+            return Parker::Owned(ThreadParker::const_new())
+        }
+
+        thread_local! {
+            static HANDLE: ThreadParker = const {ThreadParker::const_new()}
+        }
+        HANDLE.with(|handle| {
+            unsafe {Parker::Ref(core::mem::transmute(handle))}
+        })
+    }
+    
+    fn lock_shared_inner<T:Timeout>(&self, timeout: Option<T>)->bool {
+        loop {
+            let state = self.state.fetch_add(ONE_READER, Ordering::Acquire) + ONE_READER;
+            if state.is_shared_locked() {
+                return true;
+            }
+
+            let parker = Self::get_parker();
+            parker.prepare_park();
+            let waker = MaybeAsync::Parker(parker.waker());
+
+            let mut node = ConcurrentIntrusiveList::make_node(waker);
+            let pinned_node = pin!(node);
+
+            let (park_result, _) = self.reader_queue.push_head(pinned_node, |_, _|{
+                if self.state.load(Ordering::Acquire).is_shared_locked() {
+                    // it's already read locked so don't bother
+                    return (false, ());
+                }
+                (true, ())
+            });
+            if let Err(park_error) = park_result {
+                if park_error == Error::AbortedPush {
+                    //we got the lock
+                    return true;
+                }
+                panic!("The node was dirty");
+            }
+
+            if self.state.load(Ordering::Acquire).is_shared_locked() {
+                return true;
+            }
+            if let Some(timeout) = &timeout {
+                if !parker.park_until(timeout.to_instant()) {
+                    return false;
+                }
+            } else {
+                parker.park();
+            }
+        }
+    }
+
     pub fn lock_shared(&self) {
-        todo!()
+        self.lock_shared_inner::<Instant>(None);
     }
 
     pub fn try_lock_shared(&self) -> bool {
@@ -97,8 +154,59 @@ impl RawRwLock {
         }
     }
 
+    fn lock_exclusive_inner<T: Timeout>(&self, timeout: Option<T>) -> bool {
+        if self.try_lock_exclusive() {
+            return true;
+        }
+
+
+        let parker = Self::get_parker();
+        parker.prepare_park();
+        let waker = MaybeAsync::Parker(parker.waker());
+
+        let mut node = ConcurrentIntrusiveList::make_node(waker);
+        let pinned_node = pin!(node);
+
+        let (park_result, _) = self.writer_queue.push_head(pinned_node, |_, _|{
+            let mut state = self.state.load(Ordering::Acquire);
+            while state.is_unlocked() || state & EXCLUSIVE_WAITING == 0 {
+                if state.is_unlocked() {
+                    if let Err(new_state) = self.state.compare_exchange(state, state | EXCLUSIVE_LOCK, Ordering::Acquire, Ordering::Acquire) {
+                        state = new_state;
+                    } else {
+                        // we got the lock abort the push
+                        return (false, ());
+                    }
+                } else {
+                    state = self.state.compare_exchange(state, state | EXCLUSIVE_WAITING, Ordering::AcqRel, Ordering::Acquire).unwrap_or_else(|u| u);
+                }
+            }
+
+            (true, ())
+        });
+
+        if let Err(park_error) = park_result {
+            if park_error == Error::AbortedPush {
+                //we got the lock
+                return true;
+            }
+            panic!("The node was dirty");
+        }
+
+        if let Some(timeout) = &timeout {
+            if !parker.park_until(timeout.to_instant()) {
+                return false;
+            }
+        } else {
+            parker.park();
+        }
+        
+        
+        false
+    }
+    
     pub fn lock_exclusive(&self) {
-        todo!()
+        self.lock_exclusive_inner::<Instant>(None);
     }
 
     pub fn try_lock_exclusive(&self) -> bool {
@@ -198,90 +306,90 @@ impl RawRwLock {
 }
 
 
-//
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use itertools::Itertools;
-//     use std::sync::atomic::AtomicU8;
-//     use std::sync::Arc;
-//
-//     #[test]
-//     fn shared() {
-//         let lock = RawRwLock::new();
-//         lock.lock_shared();
-//         lock.lock_shared();
-//         lock.lock_shared();
-//         let state = lock.state.load(Ordering::Relaxed);
-//         assert_eq!(state, (ONE_SHARED * 3) | SHARED_LOCK);
-//
-//         unsafe {
-//             lock.unlock_shared();
-//         }
-//         let state = lock.state.load(Ordering::Relaxed);
-//         assert_eq!(state, (ONE_SHARED * 2) | SHARED_LOCK);
-//
-//         unsafe {
-//             lock.unlock_shared();
-//         }
-//         let state = lock.state.load(Ordering::Relaxed);
-//         assert_eq!(state, ONE_SHARED | SHARED_LOCK);
-//
-//         unsafe {
-//             lock.unlock_shared();
-//         }
-//         let state = lock.state.load(Ordering::Relaxed);
-//         assert_eq!(state, 0);
-//     }
-//
-//     #[test]
-//     fn try_exclusive_fails() {
-//         let lock = RawRwLock::new();
-//         assert!(lock.try_lock_shared());
-//         assert!(!lock.try_lock_exclusive());
-//         let state = lock.state.load(Ordering::Relaxed);
-//         assert_eq!(state, ONE_SHARED | SHARED_LOCK);
-//     }
-//
-//     #[test]
-//     fn readers_wait() {
-//         let value = Arc::new(AtomicU8::new(0));
-//         let lock = Arc::new(RawRwLock::new());
-//         let barrier = Arc::new(std::sync::Barrier::new(4));
-//
-//         let handles = (0..3)
-//             .map(|_| {
-//                 let lock = lock.clone();
-//                 let value = value.clone();
-//                 let barrier = barrier.clone();
-//                 std::thread::spawn(move || {
-//                     barrier.wait();
-//                     lock.lock_shared();
-//                     assert!(num_readers(lock.state.load(Ordering::Relaxed)) <= 3);
-//                     assert_eq!(value.load(Ordering::Relaxed), 42);
-//                     unsafe {
-//                         lock.unlock_shared();
-//                     }
-//                 })
-//             })
-//             .collect_vec();
-//
-//         lock.lock_exclusive();
-//         assert_eq!(lock.state.load(Ordering::Relaxed), EXCLUSIVE_LOCK);
-//         barrier.wait();
-//         while lock.reader_queue.num_waiting() != 3 {
-//             std::thread::yield_now();
-//         }
-//         std::thread::sleep(std::time::Duration::from_millis(10));
-//         assert_eq!(lock.reader_queue.num_waiting(), 3);
-//         value.store(42, Ordering::Relaxed);
-//         unsafe {
-//             lock.unlock_exclusive();
-//         }
-//
-//         for thread in handles {
-//             thread.join().unwrap();
-//         }
-//         assert_eq!(lock.state.load(Ordering::Relaxed), 0);
-//     }
-// }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use itertools::Itertools;
+    use std::sync::atomic::AtomicU8;
+    use std::sync::Arc;
+
+    #[test]
+    fn shared() {
+        let lock = RawRwLock::new();
+        lock.lock_shared();
+        lock.lock_shared();
+        lock.lock_shared();
+        let state = lock.state.load(Ordering::Relaxed);
+        assert_eq!(state, ONE_READER * 3);
+    
+        unsafe {
+            lock.unlock_shared();
+        }
+        let state = lock.state.load(Ordering::Relaxed);
+        assert_eq!(state, ONE_READER * 2);
+    
+        unsafe {
+            lock.unlock_shared();
+        }
+        let state = lock.state.load(Ordering::Relaxed);
+        assert_eq!(state, ONE_READER );
+    
+        unsafe {
+            lock.unlock_shared();
+        }
+        let state = lock.state.load(Ordering::Relaxed);
+        assert_eq!(state, 0);
+    }
+
+    #[test]
+    fn try_exclusive_fails() {
+        let lock = RawRwLock::new();
+        assert!(lock.try_lock_shared());
+        assert!(!lock.try_lock_exclusive());
+        let state = lock.state.load(Ordering::Relaxed);
+        assert_eq!(state, ONE_READER);
+    }
+
+    #[test]
+    fn readers_wait() {
+        let value = Arc::new(AtomicU8::new(0));
+        let lock = Arc::new(RawRwLock::new());
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+    
+        let handles = (0..3)
+            .map(|_| {
+                let lock = lock.clone();
+                let value = value.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    lock.lock_shared();
+                    assert!(lock.state.load(Ordering::Relaxed).num_shared() <= 3);
+                    assert_eq!(value.load(Ordering::Relaxed), 42);
+                    unsafe {
+                        lock.unlock_shared();
+                    }
+                })
+            })
+            .collect_vec();
+    
+        lock.lock_exclusive();
+        assert_eq!(lock.state.load(Ordering::Relaxed), EXCLUSIVE_LOCK);
+        barrier.wait();
+        while lock.reader_queue.count() != 3 {
+            std::thread::yield_now();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert_eq!(lock.reader_queue.count(), 3);
+        value.store(42, Ordering::Relaxed);
+        unsafe {
+            lock.unlock_exclusive();
+        }
+    
+        for thread in handles {
+            thread.join().unwrap();
+        }
+        assert_eq!(lock.state.load(Ordering::Relaxed), 0);
+    }
+}
