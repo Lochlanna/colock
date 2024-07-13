@@ -111,23 +111,23 @@ impl<T> MiniLock<T> {
     fn push_or_lock(&self, node: &mut Node) -> bool {
         assert_eq!(node.next, null_mut());
 
-        if let Err(mut head) = self.head.compare_exchange(0, LOCKED_BIT, Ordering::Acquire, Ordering::Acquire) {
-            loop {
+        let mut head = 0;
+        loop {
+            if head.get_flag() {
+                // it's locked, so we will just try and push the node onto the list
                 node.next = (head & PTR_MASK) as *mut Node;
-                if head.get_flag() {
-                    match self.head.compare_exchange(head, node.as_usize_ptr() | LOCKED_BIT, Ordering::AcqRel, Ordering::Acquire) {
-                        Err(new_head) => head = new_head,
-                        Ok(_) => return false, // we didn't lock the lock, but we did push the node
-                    }
-                } else {
-                    match self.head.compare_exchange(head, head | LOCKED_BIT, Ordering::Acquire, Ordering::Acquire) {
-                        Err(new_head) => head = new_head,
-                        Ok(_) => return true, // we locked the lock
-                    }
+                match self.head.compare_exchange(head, node.as_usize_ptr() | LOCKED_BIT, Ordering::AcqRel, Ordering::Acquire) {
+                    Err(new_head) => head = new_head,
+                    Ok(_) => return false, // we didn't lock the lock, but we did push the node
+                }
+            } else {
+                // it's not locked. Try and grab the lock!
+                match self.head.compare_exchange(head, head | LOCKED_BIT, Ordering::Acquire, Ordering::Acquire) {
+                    Err(new_head) => head = new_head,
+                    Ok(_) => return true, // we locked the lock
                 }
             }
         }
-        true
     }
 
     fn pop(&self)->Option<ThreadWaker> {
@@ -211,7 +211,7 @@ impl<T> MiniLock<T> {
                 return;
             }
         }
-        
+
     }
 
     pub fn lock(&self)->MiniLockGuard<T> {
@@ -229,12 +229,11 @@ impl<T> MiniLock<T> {
             if let Some(guard) = self.try_lock() {
                 return guard;
             }
-            
-            while !self.push_if_locked(&mut node) {
-                if let Some(guard) = self.try_lock() {
-                    return guard;
+
+            if self.push_or_lock(&mut node) {
+                return MiniLockGuard {
+                    inner: self,
                 }
-                node.next = null_mut();
             }
             parker.park();
         }
