@@ -5,16 +5,23 @@ use std::time::{Duration, Instant};
 
 //TODO naming here is weird...
 #[derive(Debug)]
-pub(crate) enum MaybeAsync {
+pub(crate) enum MaybeAsyncWaker {
     Parker(ThreadWaker),
     Waker(Waker)
 }
 
-impl MaybeAsync {
+impl MaybeAsyncWaker {
     pub fn wake(self) {
         match self {
-            MaybeAsync::Parker(p) => p.wake(),
-            MaybeAsync::Waker(w) => w.wake()
+            MaybeAsyncWaker::Parker(p) => p.wake(),
+            MaybeAsyncWaker::Waker(w) => w.wake()
+        }
+    }
+
+    pub fn wake_by_ref(&self) {
+        match self {
+            MaybeAsyncWaker::Parker(p) => p.wake_by_ref(),
+            MaybeAsyncWaker::Waker(w) => w.wake_by_ref()
         }
     }
 }

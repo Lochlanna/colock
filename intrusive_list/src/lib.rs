@@ -59,6 +59,16 @@ impl<D> Node<D> {
     }
 }
 
+pub enum NodeAction{
+    Retain,
+    Remove,
+}
+
+pub enum ScanAction{
+    Continue,
+    Stop,
+}
+
 pub struct ConcurrentIntrusiveList<D> {
     inner_list: mini_lock::MiniLock<IntrusiveList<D>>
 }
@@ -142,6 +152,12 @@ impl<D> ConcurrentIntrusiveList<D> {
 
     pub const fn make_node(data: D)->Node<D> {
         Node::new(data)
+    }
+
+    pub fn scan(&self, f: impl FnMut(&mut D, usize)->(NodeAction, ScanAction)) -> usize {
+        let mut list = self.inner_list.lock();
+        list.scan(f);
+        list.count
     }
 }
 
@@ -292,6 +308,29 @@ impl<D> IntrusiveList<D> {
             self.count -= 1;
         }
         node.is_on_list.store(false, Ordering::Release);
+    }
+
+    pub fn scan(&mut self, mut f: impl FnMut(&mut D, usize)->(NodeAction, ScanAction)) {
+        let mut current_node = self.head;
+        while !current_node.is_null() {
+            let current_node_ref = unsafe {&mut *current_node};
+            let (node_action, scan_action) = f(current_node_ref.data.as_mut().unwrap(), self.count);
+            match node_action {
+                NodeAction::Retain => {}
+                NodeAction::Remove => {
+                    current_node = current_node_ref.next;
+                    current_node_ref.data = None;
+                    self.remove_node(current_node_ref)
+                }
+            }
+
+            match scan_action {
+                ScanAction::Continue => {}
+                ScanAction::Stop => {
+                    return
+                }
+            }
+        }
     }
 }
 

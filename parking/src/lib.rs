@@ -95,6 +95,12 @@ impl ThreadWaker {
             (*self.parker).unpark();
         }
     }
+
+    pub fn wake_by_ref(&self) {
+        unsafe {
+            (*self.parker).unpark();
+        }
+    }
 }
 
 #[cfg(test)]

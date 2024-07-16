@@ -1,20 +1,23 @@
 use core::sync::atomic::AtomicUsize;
+use std::cell::{Cell, UnsafeCell};
 use std::pin::pin;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use intrusive_list::{ConcurrentIntrusiveList, Error};
+use intrusive_list::{ConcurrentIntrusiveList, Error, NodeAction, ScanAction};
 use parking::{Parker, ThreadParker, ThreadParkerT};
-use crate::lock_utils::{MaybeAsync, Timeout};
+use crate::lock_utils::{MaybeAsyncWaker, Timeout};
 const UNLOCKED: usize = 0;
 const EXCLUSIVE_LOCK: usize = 0b1;
 const EXCLUSIVE_WAITING: usize = 0b10;
-const ONE_READER: usize = 0b100;
+const FAIR: usize = 0b100;
+const ONE_READER: usize = 0b1000;
 
 trait State: Copy {
     fn is_shared_locked(self)->bool;
     fn is_exclusive_locked(self)->bool;
     fn is_unlocked(self)->bool;
     fn num_shared(self) ->usize;
+    fn is_fair(self) ->bool;
     fn exclusive_waiting(self)->bool;
 }
 
@@ -32,7 +35,11 @@ impl State for usize {
     }
 
     fn num_shared(self) -> usize {
-        self >> 2
+        self >> 3
+    }
+
+    fn is_fair(self)->bool {
+        self & FAIR == FAIR
     }
 
     fn exclusive_waiting(self) -> bool {
@@ -41,10 +48,36 @@ impl State for usize {
 }
 
 #[derive(Debug)]
+enum WaitToken {
+    Reader(MaybeAsyncWaker),
+    Writer(MaybeAsyncWaker)
+}
+
+impl WaitToken {
+    fn wake(&self){
+        match self {
+            Self::Reader(w) | Self::Writer(w) => w.wake_by_ref(),
+        }
+    }
+
+    fn is_writer(&self)->bool {
+        match self {
+            WaitToken::Reader(_) => false,
+            WaitToken::Writer(_) => true
+        }
+    }
+
+    fn is_reader(&self)->bool {
+        !self.is_writer()
+    }
+}
+
+#[derive(Debug)]
 pub struct RawRwLock {
     state: AtomicUsize,
-    reader_queue: ConcurrentIntrusiveList<MaybeAsync>,
-    writer_queue: ConcurrentIntrusiveList<MaybeAsync>,
+    queue: ConcurrentIntrusiveList<WaitToken>,
+    //todo can we make this safer so it cant be accidentally used wrong...?
+    exclusive_waiting_count: UnsafeCell<usize> // this value can only be accessed from within the LL lock...
 }
 
 impl Default for RawRwLock {
@@ -57,8 +90,8 @@ impl RawRwLock {
     pub const fn new() -> Self {
         Self {
             state: AtomicUsize::new(0),
-            reader_queue: ConcurrentIntrusiveList::new(),
-            writer_queue: ConcurrentIntrusiveList::new(),
+            queue: ConcurrentIntrusiveList::new(),
+            exclusive_waiting_count: UnsafeCell::new(0),
         }
     }
 
@@ -82,22 +115,23 @@ impl RawRwLock {
             unsafe {Parker::Ref(core::mem::transmute(handle))}
         })
     }
-    
+
     fn lock_shared_inner<T:Timeout>(&self, timeout: Option<T>)->bool {
+        let mut state = self.state.fetch_add(ONE_READER, Ordering::Acquire) + ONE_READER;
         loop {
-            let state = self.state.fetch_add(ONE_READER, Ordering::Acquire) + ONE_READER;
             if state.is_shared_locked() {
                 return true;
             }
 
             let parker = Self::get_parker();
             parker.prepare_park();
-            let waker = MaybeAsync::Parker(parker.waker());
+            let waker = MaybeAsyncWaker::Parker(parker.waker());
+            let token = WaitToken::Reader(waker);
 
-            let mut node = ConcurrentIntrusiveList::make_node(waker);
+            let mut node = ConcurrentIntrusiveList::make_node(token);
             let pinned_node = pin!(node);
 
-            let (park_result, _) = self.reader_queue.push_head(pinned_node, |_, _|{
+            let (park_result, _) = self.queue.push_head(pinned_node, |_, _|{
                 if self.state.load(Ordering::Acquire).is_shared_locked() {
                     // it's already read locked so don't bother
                     return (false, ());
@@ -112,16 +146,27 @@ impl RawRwLock {
                 panic!("The node was dirty");
             }
 
-            if self.state.load(Ordering::Acquire).is_shared_locked() {
+            state = self.state.load(Ordering::Acquire);
+            if state.is_shared_locked() {
                 return true;
             }
             if let Some(timeout) = &timeout {
                 if !parker.park_until(timeout.to_instant()) {
-                    return false;
+                    loop {
+                        if let Err(new_state) = self.state.compare_exchange(state, state - ONE_READER, Ordering::Release, Ordering::Acquire) {
+                            state = new_state;
+                            if state.is_shared_locked() {
+                                return true;
+                            }
+                        } else {
+                            return false;
+                        }
+                    }
                 }
             } else {
                 parker.park();
             }
+            state = self.state.load(Ordering::Acquire);
         }
     }
 
@@ -144,8 +189,10 @@ impl RawRwLock {
 
     pub unsafe fn unlock_shared(&self) {
         let state = self.state.fetch_sub(ONE_READER, Ordering::Release);
-        if state.num_shared() == 0 && state.exclusive_waiting() {
-            self.writer_queue.pop_tail(|waker, num_waiting|{
+        if state.num_shared() == 0 && state.exclusive_waiting() { 
+            // we unlocked the shared lock and there is a waiting writer
+            self.queue.pop_tail(|waker, num_waiting|{
+                debug_assert!(waker.is_writer());
                 waker.wake();
                 if num_waiting == 0 {
                     self.state.fetch_and(!EXCLUSIVE_WAITING, Ordering::Release);
@@ -155,56 +202,61 @@ impl RawRwLock {
     }
 
     fn lock_exclusive_inner<T: Timeout>(&self, timeout: Option<T>) -> bool {
-        if self.try_lock_exclusive() {
-            return true;
-        }
-
-
-        let parker = Self::get_parker();
-        parker.prepare_park();
-        let waker = MaybeAsync::Parker(parker.waker());
-
-        let mut node = ConcurrentIntrusiveList::make_node(waker);
-        let pinned_node = pin!(node);
-
-        let (park_result, _) = self.writer_queue.push_head(pinned_node, |_, _|{
-            let mut state = self.state.load(Ordering::Acquire);
-            while state.is_unlocked() || state & EXCLUSIVE_WAITING == 0 {
-                if state.is_unlocked() {
-                    if let Err(new_state) = self.state.compare_exchange(state, state | EXCLUSIVE_LOCK, Ordering::Acquire, Ordering::Acquire) {
-                        state = new_state;
-                    } else {
-                        // we got the lock abort the push
-                        return (false, ());
-                    }
-                } else {
-                    state = self.state.compare_exchange(state, state | EXCLUSIVE_WAITING, Ordering::AcqRel, Ordering::Acquire).unwrap_or_else(|u| u);
-                }
-            }
-
-            (true, ())
-        });
-
-        if let Err(park_error) = park_result {
-            if park_error == Error::AbortedPush {
-                //we got the lock
+        loop {
+            if self.try_lock_exclusive() {
                 return true;
             }
-            panic!("The node was dirty");
-        }
 
-        if let Some(timeout) = &timeout {
-            if !parker.park_until(timeout.to_instant()) {
-                return false;
+            let parker = Self::get_parker();
+            parker.prepare_park();
+            let waker = MaybeAsyncWaker::Parker(parker.waker());
+            let token = WaitToken::Writer(waker);
+
+            let mut node = ConcurrentIntrusiveList::make_node(token);
+            let pinned_node = pin!(node);
+
+            let (park_result, _) = self.queue.push_head(pinned_node, |_, _|{
+                let mut state = self.state.load(Ordering::Acquire);
+                while state.is_unlocked() || state & EXCLUSIVE_WAITING == 0 {
+                    if state.is_unlocked() {
+                        if let Err(new_state) = self.state.compare_exchange(state, state | EXCLUSIVE_LOCK, Ordering::Acquire, Ordering::Acquire) {
+                            state = new_state;
+                        } else {
+                            // we got the lock abort the push
+                            return (false, ());
+                        }
+                    } else {
+                        state = self.state.compare_exchange(state, state | EXCLUSIVE_WAITING, Ordering::AcqRel, Ordering::Acquire).unwrap_or_else(|u| u);
+                    }
+                }
+                self.exclusive_waiting_count.set(self.exclusive_waiting_count.get() + 1);
+                (true, ())
+            });
+
+            if let Err(park_error) = park_result {
+                if park_error == Error::AbortedPush {
+                    //we got the lock
+                    return true;
+                }
+                panic!("The node was dirty");
             }
-        } else {
-            parker.park();
+
+            if let Some(timeout) = &timeout {
+                if !parker.park_until(timeout.to_instant()) {
+                    return false;
+                }
+            } else {
+                parker.park();
+            }
+
+            let state = self.state.load(Ordering::Acquire);
+            if state.is_exclusive_locked() && state.is_fair() {
+                // we have been woken to fairly take this lock so we can assume it's ours!
+                return true;
+            }
         }
-        
-        
-        false
     }
-    
+
     pub fn lock_exclusive(&self) {
         self.lock_exclusive_inner::<Instant>(None);
     }
@@ -213,7 +265,8 @@ impl RawRwLock {
         let Err(mut state) = self.state.compare_exchange(UNLOCKED, EXCLUSIVE_LOCK, Ordering::Acquire, Ordering::Relaxed) else {
             return true;
         };
-        while state.num_shared() == 0 && !state.is_exclusive_locked() {
+        while state == EXCLUSIVE_WAITING {
+            // the exclusive wait bit is set. Attempt to barge the lock!
             if let Err(new_state) = self.state.compare_exchange(state, state | EXCLUSIVE_LOCK, Ordering::Acquire, Ordering::Relaxed) {
                 state = new_state;
             } else {
@@ -225,18 +278,32 @@ impl RawRwLock {
 
     pub unsafe fn unlock_exclusive(&self) {
         let state = self.state.fetch_and(!EXCLUSIVE_LOCK, Ordering::Release);
-        if state.num_shared() == 0 && state.exclusive_waiting() {
-            self.writer_queue.pop_tail(|waker, num_waiting|{
+        if state.num_shared() > 0 || state.exclusive_waiting() {
+            let mut unlock_shared:bool = false;
+            self.queue.scan(|waker, _|{
+                if !unlock_shared && waker.is_reader() {
+                    // we will unpark readers from now on!
+                    unlock_shared = true
+                }
+                if unlock_shared {
+                    if waker.is_reader() {
+                        waker.wake();
+                        return (NodeAction::Remove, ScanAction::Continue);
+                    }
+                    // it's a writer node so ignore it!
+                    return (NodeAction::Retain, ScanAction::Continue);
+                }
+
+                // we are waking just one writer!
                 waker.wake();
-                if num_waiting == 0 {
+                let writer_wait_count = self.exclusive_waiting_count.get();
+                debug_assert!(writer_wait_count > 0);
+                self.exclusive_waiting_count.set(writer_wait_count - 1);
+                if writer_wait_count == 1 {
                     self.state.fetch_and(!EXCLUSIVE_WAITING, Ordering::Release);
                 }
-            }, ||{});
-        } else if state.num_shared() > 0 {
-            // wake all readers
-            self.reader_queue.pop_all(|waker, _|{
-                waker.wake();
-            }, ||{});
+                (NodeAction::Remove, ScanAction::Stop)
+            });
         }
     }
 
@@ -249,19 +316,19 @@ impl RawRwLock {
     }
 
     pub fn try_lock_shared_for(&self, timeout: Duration) -> bool {
-        todo!()
+        self.lock_shared_inner(Some(timeout))
     }
 
     pub fn try_lock_shared_until(&self, timeout: Instant) -> bool {
-        todo!()
+        self.lock_shared_inner(Some(timeout))
     }
 
     pub fn try_lock_exclusive_for(&self, timeout: Duration) -> bool {
-        todo!()
+        self.lock_exclusive_inner(Some(timeout))
     }
 
     pub fn try_lock_exclusive_until(&self, timeout: Instant) -> bool {
-        todo!()
+        self.lock_exclusive_inner(Some(timeout))
     }
 
     pub unsafe fn unlock_shared_fair(&self) {
@@ -272,13 +339,24 @@ impl RawRwLock {
         todo!()
     }
 
-    //should this be unsafe??
-    pub fn bump_shared(&self) {
-        todo!()
+    pub unsafe fn bump_shared(&self) {
+        let state = self.state.load(Ordering::Acquire);
+        debug_assert!(state.is_shared_locked());
+        if !state.exclusive_waiting() {
+            return;
+        }
+        self.unlock_shared_fair();
+        self.lock_shared();
     }
 
     pub unsafe fn bump_exclusive(&self) {
-        todo!()
+        let state = self.state.load(Ordering::Acquire);
+        debug_assert!(state.is_exclusive_locked());
+        if state.num_shared() == 0 {
+            return;
+        }
+        self.unlock_exclusive_fair();
+        self.lock_exclusive();
     }
     pub fn lock_upgradable(&self) {
         todo!()
@@ -322,19 +400,19 @@ mod tests {
         lock.lock_shared();
         let state = lock.state.load(Ordering::Relaxed);
         assert_eq!(state, ONE_READER * 3);
-    
+
         unsafe {
             lock.unlock_shared();
         }
         let state = lock.state.load(Ordering::Relaxed);
         assert_eq!(state, ONE_READER * 2);
-    
+
         unsafe {
             lock.unlock_shared();
         }
         let state = lock.state.load(Ordering::Relaxed);
         assert_eq!(state, ONE_READER );
-    
+
         unsafe {
             lock.unlock_shared();
         }
@@ -356,7 +434,7 @@ mod tests {
         let value = Arc::new(AtomicU8::new(0));
         let lock = Arc::new(RawRwLock::new());
         let barrier = Arc::new(std::sync::Barrier::new(4));
-    
+
         let handles = (0..3)
             .map(|_| {
                 let lock = lock.clone();
@@ -373,20 +451,20 @@ mod tests {
                 })
             })
             .collect_vec();
-    
+
         lock.lock_exclusive();
         assert_eq!(lock.state.load(Ordering::Relaxed), EXCLUSIVE_LOCK);
         barrier.wait();
-        while lock.reader_queue.count() != 3 {
+        while lock.queue.count() != 3 {
             std::thread::yield_now();
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
-        assert_eq!(lock.reader_queue.count(), 3);
+        assert_eq!(lock.queue.count(), 3);
         value.store(42, Ordering::Relaxed);
         unsafe {
             lock.unlock_exclusive();
         }
-    
+
         for thread in handles {
             thread.join().unwrap();
         }
