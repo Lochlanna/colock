@@ -77,8 +77,11 @@ pub struct RawRwLock {
     state: AtomicUsize,
     queue: ConcurrentIntrusiveList<WaitToken>,
     //todo can we make this safer so it cant be accidentally used wrong...?
-    exclusive_waiting_count: UnsafeCell<usize> // this value can only be accessed from within the LL lock...
+    exclusive_waiting_count: Cell<usize> // this value can only be accessed from within the LL lock...
 }
+
+unsafe impl Send for RawRwLock{}
+unsafe impl Sync for RawRwLock{}
 
 impl Default for RawRwLock {
     fn default() -> Self {
@@ -91,7 +94,7 @@ impl RawRwLock {
         Self {
             state: AtomicUsize::new(0),
             queue: ConcurrentIntrusiveList::new(),
-            exclusive_waiting_count: UnsafeCell::new(0),
+            exclusive_waiting_count: Cell::new(0),
         }
     }
 

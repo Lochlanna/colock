@@ -59,11 +59,13 @@ impl<D> Node<D> {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub enum NodeAction{
     Retain,
     Remove,
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub enum ScanAction{
     Continue,
     Stop,
@@ -248,21 +250,10 @@ impl<D> IntrusiveList<D> {
             return None;
         }
         let head = unsafe {&mut* self.head};
-        debug_assert!(head.prev.is_null());
-        if self.head == self.tail {
-            debug_assert!(head.next.is_null());
-            self.head = core::ptr::null_mut();
-            self.tail = core::ptr::null_mut();
-        } else {
-            let next = unsafe {&mut *head.next};
-            next.prev = core::ptr::null_mut();
-            self.head = head.next;
-        }
-
-        self.count -= 1;
-
-
-        let data = Some(head.data.take().expect("data has already been taken from the node"));
+        self.remove_node(head);
+        
+        let data = head.data.take();
+        debug_assert!(data.is_some(), "data was null on pop head");
         head.is_on_list.store(false, Ordering::Release);
         data
     }
@@ -272,62 +263,66 @@ impl<D> IntrusiveList<D> {
             return None;
         }
         let tail = unsafe {&mut* self.tail};
-        debug_assert!(tail.next.is_null());
-        if self.head == self.tail {
-            debug_assert!(tail.prev.is_null());
-            self.head = core::ptr::null_mut();
-            self.tail = core::ptr::null_mut();
-        } else {
-            let prev = unsafe {&mut *tail.prev};
-            prev.next = core::ptr::null_mut();
-            self.tail = tail.prev;
-        }
-
-        self.count -= 1;
+        self.remove_node(tail);
 
 
-        let data = Some(tail.data.take().expect("data has already been taken from the node"));
+        let data = tail.data.take();
+        debug_assert!(data.is_some(), "data was null on pop tail");
         tail.is_on_list.store(false, Ordering::Release);
         data
     }
 
     fn remove_node(&mut self, node: &mut Node<D>) {
-        if !node.is_on_list.load(Ordering::Acquire) {
+        if !node.is_on_list.swap(false, Ordering::AcqRel) {
             return;
         }
         if self.head == node {
-            self.pop_head();
+            let head = unsafe {&mut* self.head};
+            debug_assert!(head.prev.is_null());
+            if self.head == self.tail {
+                debug_assert!(head.next.is_null());
+                self.head = core::ptr::null_mut();
+                self.tail = core::ptr::null_mut();
+            } else {
+                let next = unsafe {&mut *head.next};
+                next.prev = core::ptr::null_mut();
+                self.head = head.next;
+            }
         } else if self.tail == node {
-            self.pop_tail();
+            let tail = unsafe {&mut* self.tail};
+            if self.head == self.tail {
+                debug_assert!(tail.prev.is_null());
+                self.head = core::ptr::null_mut();
+                self.tail = core::ptr::null_mut();
+            } else {
+                let prev = unsafe {&mut *tail.prev};
+                prev.next = core::ptr::null_mut();
+                self.tail = tail.prev;
+            }
         } else {
             // we are somewhere in the middle of the list
             let prev = unsafe {&mut *node.prev};
             let next = unsafe {&mut *node.next};
             prev.next = node.next;
             next.prev = node.prev;
-            self.count -= 1;
         }
-        node.is_on_list.store(false, Ordering::Release);
+        self.count -= 1;
     }
 
     pub fn scan(&mut self, mut f: impl FnMut(&mut D, usize)->(NodeAction, ScanAction)) {
         let mut current_node = self.head;
-        while !current_node.is_null() {
+        let mut scan_action= ScanAction::Continue;
+        while !current_node.is_null() && scan_action == ScanAction::Continue {
             let current_node_ref = unsafe {&mut *current_node};
-            let (node_action, scan_action) = f(current_node_ref.data.as_mut().unwrap(), self.count);
+            current_node = current_node_ref.next;
+            let node_action;
+            (node_action, scan_action) = f(current_node_ref.data.as_mut().unwrap(), self.count);
             match node_action {
-                NodeAction::Retain => {}
+                NodeAction::Retain => {
+                }
                 NodeAction::Remove => {
-                    current_node = current_node_ref.next;
                     current_node_ref.data = None;
                     self.remove_node(current_node_ref)
-                }
-            }
-
-            match scan_action {
-                ScanAction::Continue => {}
-                ScanAction::Stop => {
-                    return
                 }
             }
         }
