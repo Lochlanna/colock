@@ -156,9 +156,13 @@ impl<D> ConcurrentIntrusiveList<D> {
         Node::new(data)
     }
 
-    pub fn scan(&self, f: impl FnMut(&mut D, usize)->(NodeAction, ScanAction)) -> usize {
+    pub fn scan(&self, f: impl FnMut(&mut D, usize)->(NodeAction, ScanAction), on_empty: impl FnOnce()) -> usize {
         let mut list = self.inner_list.lock();
-        list.scan(f);
+        if list.count == 0 {
+            on_empty();
+        } else {
+            list.scan(f);
+        }
         list.count
     }
 }

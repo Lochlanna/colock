@@ -192,10 +192,15 @@ impl RawRwLock {
 
     pub unsafe fn unlock_shared(&self) {
         let state = self.state.fetch_sub(ONE_READER, Ordering::Release);
-        if state.num_shared() == 0 && state.exclusive_waiting() { 
+        if state.num_shared() == 0 && state.exclusive_waiting() {
             // we unlocked the shared lock and there is a waiting writer
             self.queue.pop_tail(|waker, num_waiting|{
                 debug_assert!(waker.is_writer());
+                if waker.is_writer() {
+                    let waiting_writer_count = self.exclusive_waiting_count.get();
+                    debug_assert!(waiting_writer_count > 0);
+                    self.exclusive_waiting_count.set(waiting_writer_count - 1);
+                }
                 waker.wake();
                 if num_waiting == 0 {
                     self.state.fetch_and(!EXCLUSIVE_WAITING, Ordering::Release);
@@ -254,7 +259,8 @@ impl RawRwLock {
 
             let state = self.state.load(Ordering::Acquire);
             if state.is_exclusive_locked() && state.is_fair() {
-                // we have been woken to fairly take this lock so we can assume it's ours!
+                // we have been woken to fairly take this lock. We can assume it's ours!
+                self.state.fetch_and(!FAIR, Ordering::Acquire);
                 return true;
             }
         }
@@ -306,7 +312,7 @@ impl RawRwLock {
                     self.state.fetch_and(!EXCLUSIVE_WAITING, Ordering::Release);
                 }
                 (NodeAction::Remove, ScanAction::Stop)
-            });
+            }, ||{});
         }
     }
 
@@ -335,11 +341,71 @@ impl RawRwLock {
     }
 
     pub unsafe fn unlock_shared_fair(&self) {
-        todo!()
+        self.queue.pop_tail(|waker, num_waiting|{
+            debug_assert!(waker.is_writer());
+            let mut current_state = self.state.load(Ordering::Acquire);
+            loop {
+                let target_state = if current_state.num_shared() == 1 {
+                    if num_waiting > 1 {
+                        FAIR | EXCLUSIVE_LOCK | EXCLUSIVE_WAITING
+                    } else {
+                        FAIR | EXCLUSIVE_LOCK
+                    }
+                } else {
+                    current_state - ONE_READER
+                };
+                match self.state.compare_exchange(current_state, target_state, Ordering::Release, Ordering::Acquire) {
+                    Ok(_) => {
+                        if target_state.is_exclusive_locked() {
+                            let writer_waiting_count = self.exclusive_waiting_count.get();
+                            debug_assert!(writer_waiting_count > 0);
+                            self.exclusive_waiting_count.set( writer_waiting_count - 1);
+                            waker.wake();
+                        }
+                    }
+                    Err(new_state) => {
+                        current_state = new_state;
+                    }
+                }
+            }
+        }, ||{
+            self.state.fetch_sub(ONE_READER, Ordering::Release);
+        });
     }
 
     pub unsafe fn unlock_exclusive_fair(&self) {
-        todo!()
+        let mut unlock_shared:bool = false;
+        let mut unlock = Some(||{self.state.fetch_and(!EXCLUSIVE_LOCK, Ordering::Release)});
+        self.queue.scan(|waker, _|{
+            // this ensures we only unlock once...
+            if !unlock_shared && waker.is_reader() {
+                if let Some(unlock) = unlock.take() {
+                    unlock();
+                }
+                // we will unpark readers from now on!
+                unlock_shared = true
+            }
+            if unlock_shared {
+                if waker.is_reader() {
+                    waker.wake();
+                    return (NodeAction::Remove, ScanAction::Continue);
+                }
+                // it's a writer node so ignore it!
+                return (NodeAction::Retain, ScanAction::Continue);
+            }
+            self.state.fetch_or(FAIR, Ordering::Release);
+            // we are waking just one writer!
+            waker.wake();
+            let writer_wait_count = self.exclusive_waiting_count.get();
+            debug_assert!(writer_wait_count > 0);
+            self.exclusive_waiting_count.set(writer_wait_count - 1);
+            if writer_wait_count == 1 {
+                self.state.fetch_and(!EXCLUSIVE_WAITING, Ordering::Release);
+            }
+            (NodeAction::Remove, ScanAction::Stop)
+        }, ||{
+            self.state.fetch_and(!EXCLUSIVE_LOCK, Ordering::Release);
+        });
     }
 
     pub unsafe fn bump_shared(&self) {
