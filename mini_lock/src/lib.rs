@@ -19,6 +19,7 @@ use std::ops::{Deref, DerefMut};
 use std::ptr;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, fence, Ordering};
+use lock_api::GuardSend;
 use parking::{Parker, ThreadParker, ThreadParkerT, ThreadWaker};
 
 
@@ -60,19 +61,14 @@ impl Node {
     }
 }
 
-pub struct MiniLock<T>{
+pub struct RawMiniLock{
     head: AtomicUsize,
-    data: UnsafeCell<T>
 }
 
-unsafe impl<T> Send for MiniLock<T> where T:Send {}
-unsafe impl<T> Sync for MiniLock<T> where T:Send {}
-
-impl<T> MiniLock<T> {
-    pub const fn new(data: T)-> Self {
+impl RawMiniLock {
+    pub const fn new()-> Self {
         Self {
             head: AtomicUsize::new(0),
-            data: UnsafeCell::new(data),
         }
     }
 
@@ -100,7 +96,7 @@ impl<T> MiniLock<T> {
     }
 
     fn pop(&self)->Option<ThreadWaker> {
-        assert!(self.is_locked());
+        assert!(self.head.load(Ordering::Acquire).get_flag());
 
         let mut head = self.head.load(Ordering::Acquire);
 
@@ -118,22 +114,54 @@ impl<T> MiniLock<T> {
         None
     }
 
-
-    pub fn try_lock(&self)->Option<MiniLockGuard<T>> {
-        let Err(head) = self.head.compare_exchange(0, LOCKED_BIT, Ordering::Acquire, Ordering::Acquire) else {
-            return Some(MiniLockGuard {
-                inner: self,
-            })
-        };
-        if self.head.compare_exchange(head & PTR_MASK, head | LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-            return Some(MiniLockGuard {
-                inner: self,
-            })
+    fn get_parker()-> Parker {
+        if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
+            return Parker::Owned(ThreadParker::const_new())
         }
-        None
+
+        thread_local! {
+            static HANDLE: ThreadParker = const {ThreadParker::const_new()}
+        }
+        HANDLE.with(|handle| {
+            unsafe {Parker::Ref(core::mem::transmute(handle))}
+        })
+    }
+}
+
+unsafe impl lock_api::RawMutex for RawMiniLock {
+    const INIT: Self = RawMiniLock::new();
+    type GuardMarker = GuardSend;
+
+    fn lock(&self) {
+        loop {
+            if self.try_lock() {
+                return;
+            }
+
+            // we will push ourselves onto the queue and then sleep
+
+            let parker = Self::get_parker();
+            parker.prepare_park();
+            let mut node = Node::new(parker.waker());
+
+            if self.push_or_lock(&mut node) {
+                return;
+            }
+            parker.park();
+        }
     }
 
-    pub fn unlock(&self) {
+    fn try_lock(&self) -> bool {
+        let Err(head) = self.head.compare_exchange(0, LOCKED_BIT, Ordering::Acquire, Ordering::Acquire) else {
+            return true
+        };
+        if self.head.compare_exchange(head & PTR_MASK, head | LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            return true
+        };
+        false
+    }
+
+    unsafe fn unlock(&self) {
         debug_assert!(self.is_locked());
 
         loop {
@@ -149,78 +177,16 @@ impl<T> MiniLock<T> {
                 return;
             }
         }
-
     }
 
-    pub fn lock(&self)->MiniLockGuard<T> {
-        loop {
-            if let Some(guard) = self.try_lock() {
-                return guard;
-            }
-
-            // we will push ourselves onto the queue and then sleep
-
-            let parker = Self::get_parker();
-            parker.prepare_park();
-            let mut node = Node::new(parker.waker());
-
-            if self.push_or_lock(&mut node) {
-                return MiniLockGuard {
-                    inner: self,
-                }
-            }
-            parker.park();
-        }
-    }
-
-    pub fn is_locked(&self)->bool {
+    fn is_locked(&self) -> bool {
         self.head.load(Ordering::Acquire).get_flag()
     }
-
-    fn get_parker()-> Parker {
-        if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
-            return Parker::Owned(ThreadParker::const_new())
-        }
-
-        thread_local! {
-            static HANDLE: ThreadParker = const {ThreadParker::const_new()}
-        }
-        HANDLE.with(|handle| {
-            unsafe {Parker::Ref(core::mem::transmute(handle))}
-        })
-    }
 }
 
-/// A guard that will unlock the mutex when dropped and allows access to the data via [`Deref`] and [`DerefMut`]
-pub struct MiniLockGuard<'lock, T> {
-    inner: &'lock MiniLock<T>,
-}
+pub type MiniLock<T> = lock_api::Mutex<RawMiniLock, T>;
 
-impl<T> Drop for MiniLockGuard<'_, T> {
-    fn drop(&mut self) {
-        // SAFETY: we know we hold the lock as LockGuard is only given out
-        // when the lock is held and is not Sync
-        unsafe { self.inner.unlock() };
-    }
-}
-
-impl<T> Deref for MiniLockGuard<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: we have exclusive access to the data as LockGuard is only given out
-        // when the lock is held
-        unsafe { &*self.inner.data.get() }
-    }
-}
-
-impl<T> DerefMut for MiniLockGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        // SAFETY: we have exclusive access to the data as LockGuard is only given out
-        // when the lock is held
-        unsafe { &mut *self.inner.data.get() }
-    }
-}
+pub type MiniLockGuard<'a, T> = lock_api::MutexGuard<'a, RawMiniLock, T>;
 
 #[cfg(test)]
 mod tests {
@@ -239,7 +205,7 @@ mod tests {
                     let guard = mutex.lock();
                     barrier.wait();
                     thread::sleep(Duration::from_millis(50));
-                    while mutex.head.load(Ordering::Acquire).get_ptr().is_null() {
+                    while unsafe{mutex.raw()}.head.load(Ordering::Acquire).get_ptr().is_null() {
                         thread::yield_now();
                     }
                     drop(guard);
