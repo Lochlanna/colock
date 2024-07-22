@@ -1,14 +1,15 @@
 #![allow(clippy::inline_always)]
-
+mod raw_rw_lock;
 mod read_guard;
 mod write_guard;
 
-use crate::raw_rw_lock::RawRwLock;
+use raw_rw_lock::RawRwLock;
 pub use read_guard::*;
 use std::fmt::{Debug, Formatter};
 use std::ptr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
 pub use write_guard::*;
 
 #[derive(Default)]

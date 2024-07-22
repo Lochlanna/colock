@@ -1,8 +1,11 @@
 use crate::mutex::{Mutex, MutexGuard};
 use std::cell::Cell;
-use std::pin::pin;
+use std::future::Future;
+use std::pin::{pin, Pin};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use intrusive_list::ConcurrentIntrusiveList;
+use std::task::{Context, Poll};
+use intrusive_list::{ConcurrentIntrusiveList, IntrusiveList, Node};
+use parking::{Parker, ThreadParker, ThreadParkerT};
 use crate::lock_utils::MaybeAsyncWaker;
 
 #[derive(Debug)]
@@ -22,6 +25,31 @@ impl Barrier {
         }
     }
 
+    fn get_parker()-> Parker {
+        if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
+            return Parker::Owned(ThreadParker::const_new())
+        }
+
+        thread_local! {
+            static HANDLE: ThreadParker = const {ThreadParker::const_new()}
+        }
+        HANDLE.with(|handle| {
+            unsafe {Parker::Ref(core::mem::transmute(handle))}
+        })
+    }
+    
+    fn wait_inner(&self, list: &mut IntrusiveList<MaybeAsyncWaker>, pinned_node: Pin<&mut Node<MaybeAsyncWaker>>) {
+        let num_waiting = list.count() + 1;
+        if num_waiting < self.target {
+            //TODO handle the error here...
+            list.push_head(pinned_node.get_mut(), &self.wait_queue);
+        } else {
+            while let Some(waker) = list.pop_head() {
+                waker.wake();
+            }
+        }
+    }
+
     /// Increments the internal count and blocks the thread until the count reaches the target if it
     /// is not already at the target.
     pub fn wait(&self) {
@@ -34,15 +62,10 @@ impl Barrier {
 
         let mut node = ConcurrentIntrusiveList::make_node(waker);
         let pinned_node = pin!(node);
-
-        let (park_result, wake_all) = self.wait_queue.push_head(pinned_node, |_, mut num_waiting|{
-            num_waiting += 1;
-            return (num_waiting < self.target, num_waiting == self.target)
-        });
         
-        if wake_all {
-            self.wake_all();
-        }
+        self.wait_queue.with_lock(|list| {
+            self.wait_inner(list, pinned_node);
+        });
     }
 
     /// Increments the internal count and waits until the count reaches the target if it
@@ -78,12 +101,33 @@ impl Barrier {
         //     self.wake_all(&mut guard);
         // }
     }
+}
 
-    fn wake_all(&self) {
-        // we know threads cannot be added to the queue while we hold the lock
-        self.wait_queue.pop_all(|waker, _ | {
-            waker.wake();
-        }, ||{});
+pub struct BarrierPoller<'a> {
+    barrier: &'a Barrier,
+    node: Option<Node<MaybeAsyncWaker>>
+}
+
+unsafe impl<'a> Send for BarrierPoller<'a> {}
+
+impl<'a> Future for BarrierPoller<'a> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.node.is_some() {
+            return Poll::Ready(())
+        }
+        
+        let self_mut = unsafe {self.get_unchecked_mut()};
+        let waker = MaybeAsyncWaker::Waker(cx.waker().clone());
+        let node = self_mut.node.insert(ConcurrentIntrusiveList::make_node(waker));
+        let node = unsafe {Pin::new_unchecked(node)};
+        
+        self_mut.barrier.wait_queue.with_lock(|list| {
+           self_mut.barrier.wait_inner(list, node); 
+        });
+        
+        Poll::Pending
     }
 }
 

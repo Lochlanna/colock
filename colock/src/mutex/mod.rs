@@ -1,6 +1,7 @@
 mod guard;
+mod raw_mutex;
 
-use crate::raw_mutex::RawMutex;
+pub use raw_mutex::RawMutex;
 use std::fmt::Debug;
 use std::ops::DerefMut;
 use std::sync::Arc;

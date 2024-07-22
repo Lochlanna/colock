@@ -1,6 +1,6 @@
 use std::fmt::{Debug, Formatter, Pointer};
 use std::marker::PhantomPinned;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -165,6 +165,11 @@ impl<D> ConcurrentIntrusiveList<D> {
         }
         list.count
     }
+    
+    pub fn with_lock<F, R>(&self, f: F) -> R where F: FnOnce(&mut IntrusiveList<D>) -> R {
+        let mut list = self.inner_list.lock();
+        f(list.deref_mut())
+    }
 }
 
 impl<D> Debug for ConcurrentIntrusiveList<D> where D:Debug {
@@ -184,7 +189,7 @@ impl<D> Default for ConcurrentIntrusiveList<D> {
 
 
 #[derive(Debug)]
-struct IntrusiveList<D> {
+pub struct IntrusiveList<D> {
     head: *mut Node<D>,
     tail: *mut Node<D>,
     count: usize
@@ -201,7 +206,7 @@ impl<D> IntrusiveList<D> {
         }
     }
 
-    fn push_head(&mut self, node: &mut Node<D>, outer_list: &ConcurrentIntrusiveList<D>) -> Result<usize, Error> {
+    pub fn push_head(&mut self, node: &mut Node<D>, outer_list: &ConcurrentIntrusiveList<D>) -> Result<usize, Error> {
         if node.is_on_list.swap(true, Ordering::AcqRel) || !node.prev.is_null() || !node.next.is_null() || !node.list.is_null() {
             return Err(Error::DirtyNode)
         }
@@ -225,7 +230,7 @@ impl<D> IntrusiveList<D> {
         Ok(self.count)
     }
 
-    fn push_tail(&mut self, node: &mut Node<D>, outer_list: &ConcurrentIntrusiveList<D>) -> Result<usize, Error> {
+    pub fn push_tail(&mut self, node: &mut Node<D>, outer_list: &ConcurrentIntrusiveList<D>) -> Result<usize, Error> {
         if node.is_on_list.swap(true, Ordering::AcqRel) || !node.prev.is_null() || !node.next.is_null() || !node.list.is_null() {
             return Err(Error::DirtyNode)
         }
@@ -249,7 +254,7 @@ impl<D> IntrusiveList<D> {
         Ok(self.count)
     }
 
-    fn pop_head(&mut self) -> Option<D> {
+    pub fn pop_head(&mut self) -> Option<D> {
         if self.head.is_null() {
             return None;
         }
@@ -262,7 +267,7 @@ impl<D> IntrusiveList<D> {
         data
     }
 
-    fn pop_tail(&mut self) -> Option<D> {
+    pub fn pop_tail(&mut self) -> Option<D> {
         if self.tail.is_null() {
             return None;
         }
@@ -276,7 +281,7 @@ impl<D> IntrusiveList<D> {
         data
     }
 
-    fn remove_node(&mut self, node: &mut Node<D>) {
+    pub fn remove_node(&mut self, node: &mut Node<D>) {
         if !node.is_on_list.swap(false, Ordering::AcqRel) {
             return;
         }
@@ -330,6 +335,10 @@ impl<D> IntrusiveList<D> {
                 }
             }
         }
+    }
+    
+    pub fn count(&self)->usize {
+        self.count
     }
 }
 
