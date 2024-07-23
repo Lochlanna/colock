@@ -100,14 +100,14 @@ impl RawRwLock {
         }
     }
 
-    pub fn lock_shared_async(&self) -> SharedRawRwMutexPoller {
+    pub const fn lock_shared_async(&self) -> SharedRawRwMutexPoller {
         SharedRawRwMutexPoller {
             raw_rw_lock: self,
             node: None,
         }
     }
 
-    pub fn lock_exclusive_async(&self) -> ExclusiveRawRwMutexPoller {
+    pub const fn lock_exclusive_async(&self) -> ExclusiveRawRwMutexPoller {
         ExclusiveRawRwMutexPoller {
             raw_rw_lock: self,
             node: None,
@@ -344,7 +344,7 @@ impl RawRwLock {
         if state.num_shared() > 0 || state.exclusive_waiting() {
             let mut unlock_shared: bool = false;
             self.queue.scan(
-                |waker, _| {
+                |waker, list_len| {
                     if !unlock_shared && waker.is_reader() {
                         // we will unpark readers from now on!
                         unlock_shared = true
@@ -405,9 +405,9 @@ impl RawRwLock {
                 loop {
                     let target_state = if current_state.num_shared() == 1 {
                         if num_waiting > 1 {
-                            FAIR | EXCLUSIVE_LOCK | EXCLUSIVE_WAITING
+                            ONE_READER | FAIR | EXCLUSIVE_LOCK | EXCLUSIVE_WAITING
                         } else {
-                            FAIR | EXCLUSIVE_LOCK
+                            ONE_READER | FAIR | EXCLUSIVE_LOCK
                         }
                     } else {
                         current_state - ONE_READER
@@ -424,6 +424,7 @@ impl RawRwLock {
                                 debug_assert!(writer_waiting_count > 0);
                                 self.exclusive_waiting_count.set(writer_waiting_count - 1);
                                 waker.wake();
+                                return;
                             }
                         }
                         Err(new_state) => {
@@ -442,7 +443,7 @@ impl RawRwLock {
         let mut unlock_shared: bool = false;
         let mut unlock = Some(|| self.state.fetch_and(!EXCLUSIVE_LOCK, Ordering::Release));
         self.queue.scan(
-            |waker, _| {
+            |waker, list_len| {
                 // this ensures we only unlock once...
                 if !unlock_shared && waker.is_reader() {
                     if let Some(unlock) = unlock.take() {
@@ -518,6 +519,10 @@ impl RawRwLock {
     pub unsafe fn downgrade(&self) {
         todo!()
     }
+
+    pub(crate) fn exclusive_waiting(&self) -> bool {
+        self.state.load(Ordering::Acquire).exclusive_waiting()
+    }
 }
 
 pub struct ExclusiveRawRwMutexPoller<'a> {
@@ -545,7 +550,7 @@ impl<'a> Future for ExclusiveRawRwMutexPoller<'a> {
         let (park_result, _) = self_mut
             .raw_rw_lock
             .queue
-            .push_head(node, |_, _| self_mut.raw_rw_lock.should_sleep_exclusie());
+            .push_head(node, |_, _| self_mut.raw_rw_lock.should_sleep_exclusive());
 
         if let Err(park_error) = park_result {
             if park_error == Error::AbortedPush {

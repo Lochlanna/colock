@@ -172,7 +172,21 @@ mod tests {
     #[test]
     fn test_read_guard_bump() {
         let lock = Arc::new(RwLock::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let lock_clone = lock.clone();
+        let barrier_clone = barrier.clone();
+        
+        
         let guard = lock.read();
+        let _ = thread::spawn(move || {
+            barrier_clone.wait();
+            let mut write_guard = lock_clone.write();
+            *write_guard += 1;
+        });
+        barrier.wait();
+        while !lock.exclusive_waiting() {
+            thread::yield_now();
+        }
         guard.bump();
         assert_eq!(*guard, 1);
     }

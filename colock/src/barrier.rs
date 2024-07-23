@@ -42,7 +42,10 @@ impl Barrier {
         let num_waiting = list.count() + 1;
         if num_waiting < self.target {
             //TODO handle the error here...
-            list.push_head(pinned_node.get_mut(), &self.wait_queue);
+            unsafe {
+                list.push_head(pinned_node.get_unchecked_mut(), &self.wait_queue);
+            }
+            
         } else {
             while let Some(waker) = list.pop_head() {
                 waker.wake();

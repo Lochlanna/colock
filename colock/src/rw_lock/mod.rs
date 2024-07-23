@@ -241,6 +241,10 @@ where
     const fn data(&self) -> &T {
         &self.data
     }
+    
+    pub(crate) fn exclusive_waiting(&self)->bool {
+        self.lock.exclusive_waiting()
+    }
 }
 
 impl<T> RwLock<T>
