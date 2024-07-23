@@ -26,8 +26,9 @@ impl<D> Drop for Node<D> {
     fn drop(&mut self) {
         if self.is_on_list.load(Ordering::Acquire) {
             let list = unsafe {&*self.list};
-            let mut list = list.inner_list.lock();
-            list.remove_node(self);
+            list.with_lock(|list|{
+               list.remove_node(self);
+            });
         }
     }
 }
@@ -42,20 +43,6 @@ impl<D> Node<D> {
             is_on_list: AtomicBool::new(false),
             phantom_pinned: PhantomPinned,
         }
-    }
-
-    pub fn revoke(mut self) -> Option<D> {
-        if !self.is_on_list.load(Ordering::Acquire) {
-            return None
-        }
-
-        let list = unsafe {&*self.list};
-        let mut list = list.inner_list.lock();
-        if !self.is_on_list.load(Ordering::Acquire) {
-            return None
-        }
-        list.remove_node(&mut self);
-        self.data.take()
     }
 }
 
@@ -165,7 +152,7 @@ impl<D> ConcurrentIntrusiveList<D> {
         }
         list.count
     }
-    
+
     pub fn with_lock<F, R>(&self, f: F) -> R where F: FnOnce(&mut IntrusiveList<D>) -> R {
         let mut list = self.inner_list.lock();
         f(list.deref_mut())
@@ -336,7 +323,7 @@ impl<D> IntrusiveList<D> {
             }
         }
     }
-    
+
     pub fn count(&self)->usize {
         self.count
     }
