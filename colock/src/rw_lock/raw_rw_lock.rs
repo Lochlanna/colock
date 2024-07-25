@@ -210,7 +210,7 @@ impl RawRwLock {
                             .compare_exchange(
                                 state,
                                 state | EXCLUSIVE_WAITING,
-                                Ordering::Release,
+                                Ordering::Acquire,
                                 Ordering::Acquire,
                             )
                             .unwrap_or_else(|u| u);
@@ -233,12 +233,18 @@ impl RawRwLock {
 
             // it has now been pushed onto the list. We should check that we didn't get the lock
             // one last time!
-            let state = self.state.load(Ordering::Acquire);
             if self.try_lock_exclusive() {
                 return true;
             }
 
             parker.park();
+
+            let state = self.state.load(Ordering::Acquire);
+            if state.is_fair() {
+                // we were woken to take this lock!
+                self.state.fetch_and(!FAIR, Ordering::Acquire);
+                return true;
+            }
         }
 
         true
@@ -315,12 +321,43 @@ impl RawRwLock {
         self.lock_exclusive_inner(Some(timeout))
     }
 
+    // This lock is a phase fair lock so it will unlock the opposite first.
+    // If it's currently shared there should be no waiting readers, and therefore
+    // it can only wake a writer
     pub unsafe fn unlock_shared_fair(&self) {
-        todo!()
+        let mut state = self.state.load(Ordering::Acquire);
+        loop {
+            if state.num_shared() > 1 || !state.exclusive_waiting() {
+                // We are either not the last reader or if we are there are no writers waiting to
+                // take the lock anyway
+                if let Err(new_state) = self.state.compare_exchange(state, state - ONE_READER, Ordering::Release, Ordering::Acquire){
+                    state = new_state;
+                } else {
+                    // There are still other readers holding the lock so we can't release it yet!
+                    return;
+                }
+            } else {
+                // We are the last reader and there is a writer waiting to pick up the lock
+                if let Err(new_state) = self.state.compare_exchange(state, EXCLUSIVE_LOCK | EXCLUSIVE_WAITING | FAIR, Ordering::Release, Ordering::Acquire) {
+                    state = new_state;
+                } else {
+                    // we have grabbed the lock so we can hand it off now
+                    self.write_queue.pop_tail(|waker, num_left| {
+                        waker.wake();
+                        if num_left == 0 {
+                            self.state.fetch_and(!EXCLUSIVE_WAITING, Ordering::Release);
+                        }
+                    }, ||{self.state.fetch_and(!EXCLUSIVE_WAITING, Ordering::Release);});
+                }
+            }
+        }
     }
 
+    // This lock is a phase fair lock so it will unlock the opposite first.
+    // The design of this lock makes it very easy to swap from writers to readers
+    // it does this phase change by default
     pub unsafe fn unlock_exclusive_fair(&self) {
-        todo!()
+        self.unlock_exclusive();
     }
 
     pub unsafe fn bump_shared(&self) {
