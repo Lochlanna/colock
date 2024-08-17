@@ -12,13 +12,10 @@
 #![allow(clippy::module_name_repetitions)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 
-mod atomic_const_ptr;
 mod spinwait;
-use std::cell::UnsafeCell;
-use std::ops::{Deref, DerefMut};
 use std::ptr;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, fence, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use lock_api::GuardSend;
 use parking::{Parker, ThreadParker, ThreadParkerT, ThreadWaker};
 
@@ -65,8 +62,16 @@ pub struct RawMiniLock{
     head: AtomicUsize,
 }
 
+impl Default for RawMiniLock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RawMiniLock {
-    pub const fn new()-> Self {
+    
+    /// Create a new Mini Lock
+    #[must_use] pub const fn new()-> Self {
         Self {
             head: AtomicUsize::new(0),
         }
