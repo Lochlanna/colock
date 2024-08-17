@@ -18,7 +18,7 @@ use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use lock_api::GuardSend;
 use parking::{Parker, ThreadParker, ThreadParkerT, ThreadWaker};
-
+use crate::spinwait::SpinWait;
 
 const LOCKED_BIT: usize = 0b1;
 const PTR_MASK: usize = !LOCKED_BIT;
@@ -139,8 +139,16 @@ unsafe impl lock_api::RawMutex for RawMiniLock {
 
     fn lock(&self) {
         loop {
-            if self.try_lock() {
+            let Err(mut head) = self.head.compare_exchange(0, LOCKED_BIT, Ordering::Acquire, Ordering::Acquire) else {
                 return;
+            };
+            let mut spinner: SpinWait<3, 3> = SpinWait::new();
+            while spinner.spin() {
+                if let Err(new_head) = self.head.compare_exchange(head & PTR_MASK, head | LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed) {
+                    head = new_head;
+                } else {
+                    return;
+                }
             }
 
             // we will push ourselves onto the queue and then sleep
