@@ -1,10 +1,3 @@
-// Copyright 2016 Amanieu d'Antras
-//
-// Licensed under the Apache License, Version 2.0, <LICENSE-APACHE or
-// http://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
-// http://opensource.org/licenses/MIT>, at your option. This file may not be
-// copied, modified, or distributed except according to those terms.
-
 use core::hint::spin_loop;
 
 // Wastes some CPU time for the given number of iterations,
@@ -56,19 +49,5 @@ impl<const NUM_SPINS: u32, const NUM_YIELDS: u32> SpinWait<NUM_SPINS, NUM_YIELDS
             std::thread::yield_now();
         }
         true
-    }
-
-    /// Spins without yielding the thread to the OS.
-    ///
-    /// Instead, the backoff is simply capped at a maximum value. This can be
-    /// used to improve throughput in `compare_exchange` loops that have high
-    /// contention.
-    #[inline]
-    pub fn spin_no_yield(&mut self) {
-        self.counter += 1;
-        if self.counter > NUM_SPINS {
-            self.counter = NUM_SPINS;
-        }
-        cpu_relax(1 << self.counter);
     }
 }

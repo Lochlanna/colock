@@ -13,11 +13,11 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 mod spinwait;
-use std::ptr;
+use std::{ptr, thread};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread::{current, Thread};
 use lock_api::GuardSend;
-use parking::{Parker, ThreadParker, ThreadParkerT, ThreadWaker};
 use crate::spinwait::SpinWait;
 
 const LOCKED_BIT: usize = 0b1;
@@ -42,11 +42,11 @@ impl Tagged for usize {
 #[repr(align(2))]
 struct Node {
     next: *mut Self,
-    waker: Option<ThreadWaker>
+    waker: Option<Thread>
 }
 
 impl Node {
-    const fn new(waker: ThreadWaker) -> Self {
+    const fn new(waker: Thread) -> Self {
         Self {
             next: null_mut(),
             waker: Some(waker),
@@ -86,13 +86,13 @@ impl RawMiniLock {
             if head.get_flag() {
                 // it's locked, so we will just try and push the node onto the list
                 node.next = (head & PTR_MASK) as *mut Node;
-                match self.head.compare_exchange(head, node.as_usize_ptr() | LOCKED_BIT, Ordering::AcqRel, Ordering::Acquire) {
+                match self.head.compare_exchange(head, node.as_usize_ptr() | LOCKED_BIT, Ordering::Relaxed, Ordering::Relaxed) {
                     Err(new_head) => head = new_head,
                     Ok(_) => return false, // we didn't lock the lock, but we did push the node
                 }
             } else {
                 // it's not locked. Try and grab the lock!
-                match self.head.compare_exchange(head, head | LOCKED_BIT, Ordering::Acquire, Ordering::Acquire) {
+                match self.head.compare_exchange(head, head | LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed) {
                     Err(new_head) => head = new_head,
                     Ok(_) => return true, // we locked the lock
                 }
@@ -100,15 +100,15 @@ impl RawMiniLock {
         }
     }
 
-    fn pop(&self)->Option<ThreadWaker> {
+    fn pop(&self)->Option<Thread> {
         assert!(self.head.load(Ordering::Acquire).get_flag());
 
-        let mut head = self.head.load(Ordering::Acquire);
+        let mut head = self.head.load(Ordering::Relaxed);
 
         while head != LOCKED_BIT {
             let head_ref = unsafe {&mut *head.get_ptr()};
             let next = head_ref.next;
-            if let Err(new_head) = self.head.compare_exchange(head, next as usize | LOCKED_BIT, Ordering::Release, Ordering::Acquire) {
+            if let Err(new_head) = self.head.compare_exchange(head, next as usize | LOCKED_BIT, Ordering::Relaxed, Ordering::Relaxed) {
                 head = new_head;
             } else {
                 // success!
@@ -117,19 +117,6 @@ impl RawMiniLock {
         }
 
         None
-    }
-
-    fn get_parker()-> Parker {
-        if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
-            return Parker::Owned(ThreadParker::const_new())
-        }
-
-        thread_local! {
-            static HANDLE: ThreadParker = const {ThreadParker::const_new()}
-        }
-        HANDLE.with(|handle| {
-            unsafe {Parker::Ref(core::mem::transmute(handle))}
-        })
     }
 }
 
@@ -153,24 +140,25 @@ unsafe impl lock_api::RawMutex for RawMiniLock {
 
             // we will push ourselves onto the queue and then sleep
 
-            let parker = Self::get_parker();
-            parker.prepare_park();
-            let mut node = Node::new(parker.waker());
+            let mut node = Node::new(current());
 
             if self.push_or_lock(&mut node) {
                 return;
             }
-            parker.park();
+            thread::park();
         }
     }
 
     fn try_lock(&self) -> bool {
-        let Err(head) = self.head.compare_exchange(0, LOCKED_BIT, Ordering::Acquire, Ordering::Acquire) else {
-            return true
-        };
-        if self.head.compare_exchange(head & PTR_MASK, head | LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-            return true
-        };
+        let mut head = 0;
+        while !head.get_flag() {
+            // it's unlocked. Lets try to lock it
+            if let Err(new_head) = self.head.compare_exchange(head, head | LOCKED_BIT, Ordering::Acquire, Ordering::Relaxed) {
+                head = new_head;
+            } else {
+                return true;
+            }
+        }
         false
     }
 
@@ -178,7 +166,7 @@ unsafe impl lock_api::RawMutex for RawMiniLock {
         debug_assert!(self.is_locked());
 
         loop {
-            if self.head.compare_exchange(LOCKED_BIT, 0, Ordering::Release, Ordering::Acquire).is_ok() {
+            if self.head.compare_exchange(LOCKED_BIT, 0, Ordering::Release, Ordering::Relaxed).is_ok() {
                 return;
             }
             // there are waiting nodes to be popped!
@@ -186,14 +174,14 @@ unsafe impl lock_api::RawMutex for RawMiniLock {
                 // unlock the lock
                 self.head.fetch_and(PTR_MASK, Ordering::Release);
                 // wake the thread!
-                waker.wake();
+                waker.unpark();
                 return;
             }
         }
     }
 
     fn is_locked(&self) -> bool {
-        self.head.load(Ordering::Acquire).get_flag()
+        self.head.load(Ordering::Relaxed).get_flag()
     }
 }
 
