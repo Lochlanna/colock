@@ -1,5 +1,5 @@
 use std::ops::Add;
-use parking::ThreadWaker;
+use parking::Waker as ThreadWaker;
 use std::task::Waker;
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,7 @@ impl MaybeAsyncWaker {
 
     pub fn wake_by_ref(&self) {
         match self {
-            MaybeAsyncWaker::Parker(p) => p.wake_by_ref(),
+            MaybeAsyncWaker::Parker(p) => p.wake(),
             MaybeAsyncWaker::Waker(w) => w.wake_by_ref()
         }
     }

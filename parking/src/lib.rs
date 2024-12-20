@@ -1,139 +1,86 @@
-//! A library for parking threads/tasks and waking them up.
+use std::ops::Sub;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
-#![allow(dead_code)]
-#![warn(missing_docs)]
-#![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
-#![allow(clippy::module_name_repetitions)]
-#![warn(clippy::undocumented_unsafe_blocks)]
-
-mod thread_parker;
-
-use std::fmt::{Debug, Formatter};
-use std::time::Instant;
-pub use thread_parker::thread_yield;
-pub use thread_parker::{ThreadParker, ThreadParkerT};
-
-pub enum Parker {
-    Owned(ThreadParker),
-    Ref(&'static ThreadParker),
+#[derive(Debug)]
+pub struct Parker {
+    should_wakeup: AtomicBool,
 }
 
-impl Debug for Parker {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ThreadParker")
+impl Default for Parker {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Parker {
-    pub fn new_owned(thread_parker: ThreadParker) -> Self {
-        Self::Owned(thread_parker)
+    pub const fn is_cheap_to_construct() -> bool {
+        true
     }
-
-    pub fn new_ref(thread_parker: &'static ThreadParker) -> Self {
-        Self::Ref(thread_parker)
-    }
-
-    pub fn prepare_park(&self) {
-        match self {
-            Self::Owned(thread_parker) => {
-                unsafe {thread_parker.prepare_park()}
-            }
-            Self::Ref(thread_parker) => {
-                unsafe {thread_parker.prepare_park()}
-            }
-        }
-    }
-
-    pub fn park(&self) {
-        match self {
-            Self::Owned(thread_parker) => {
-                unsafe {thread_parker.park()}
-            }
-            Self::Ref(thread_parker) => {
-                unsafe {thread_parker.park()}
-            }
-        }
-    }
-
-    pub fn park_until(&self, instant: Instant) -> bool {
-        match self {
-            Self::Owned(thread_parker) => {
-                unsafe {thread_parker.park_until(instant)}
-            }
-            Self::Ref(thread_parker) => {
-                unsafe {thread_parker.park_until(instant)}
-            }
-        }
-    }
-
-    pub fn unpark(&self) {
-        match self {
-            Self::Owned(thread_parker) => {
-                unsafe {thread_parker.unpark()}
-            }
-            Self::Ref(thread_parker) => {
-                unsafe {thread_parker.unpark()}
-            }
+    
+    pub const fn new() -> Self {
+        Self{
+            should_wakeup: AtomicBool::new(false),
         }
     }
     
-    pub const fn waker(&self)-> ThreadWaker {
-        ThreadWaker {
-            parker: self,
+    pub fn prepare_park(&self) {
+        
+    }
+    
+    pub fn waker(&self)->Waker{
+        Waker::new(self)
+    }
+    
+    pub fn park_until(&self, timeout: Instant) -> bool {
+        let mut should_wakeup = false;
+        while !should_wakeup {
+            let diff = Instant::now().sub(timeout);
+            if diff.is_zero() {
+                break;
+            }
+            std::thread::park_timeout(diff);
+            should_wakeup = self.should_wakeup.load(Ordering::Acquire);
+        }
+        should_wakeup
+    }
+    
+    pub fn park_for(&self, duration: Duration) -> bool {
+        self.park_until(Instant::now() + duration)
+    }
+    
+    pub fn park(&self) {
+        while !self.should_wakeup.load(Ordering::Acquire) {
+            std::thread::park();
         }
     }
+    
 }
 
 #[derive(Debug)]
-pub struct ThreadWaker {
-    parker: *const Parker
+pub struct Waker {
+    parker: *const Parker,
+    inner: std::thread::Thread
 }
 
-impl ThreadWaker {
-    pub fn wake(self) {
-        unsafe {
-            (*self.parker).unpark();
+impl Waker {
+    pub fn new(parker: &Parker)->Self{
+        Self {
+            parker,
+            inner: std::thread::current()
         }
     }
-
-    pub fn wake_by_ref(&self) {
-        unsafe {
-            (*self.parker).unpark();
-        }
+    
+    pub fn wake(&self) {
+        let parker =unsafe { self.parker.as_ref().unwrap() };
+        parker.should_wakeup.store(true, Ordering::Release);
+        self.inner.unpark();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::thread_parker::{ThreadParker, ThreadParkerT};
-    use std::time::{Duration, Instant};
 
-    #[test]
-    fn park_timeout() {
-        let sleep_time = Duration::from_millis(5);
-        let parker = ThreadParker::const_new();
-        unsafe {
-            parker.prepare_park();
-        }
-        let start = Instant::now();
-        let was_woken = unsafe { parker.park_until(Instant::now() + sleep_time) };
-        assert!(!was_woken);
-        let elapsed = start.elapsed();
-        assert!(elapsed >= sleep_time);
-    }
 
-    #[test]
-    fn park_wake() {
-        const SLEEP_TIME: Duration = Duration::from_millis(50);
-        let parker = ThreadParker::const_new();
-        unsafe {
-            parker.prepare_park();
-        }
-        let start = Instant::now();
-        let was_woken = unsafe { parker.park_until(Instant::now() + SLEEP_TIME) };
-        assert!(!was_woken);
-        let elapsed = start.elapsed();
-        assert!(elapsed >= SLEEP_TIME);
-    }
 }
