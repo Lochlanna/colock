@@ -1,4 +1,4 @@
-use std::fmt::{Debug, Formatter, Pointer};
+use std::fmt::{Debug, Formatter};
 use std::marker::PhantomPinned;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
@@ -17,7 +17,7 @@ pub struct Node<D> {
     list: *const ConcurrentIntrusiveList<D>,
     data: Option<D>,
     is_on_list: AtomicBool,
-    phantom_pinned: PhantomPinned
+    _phantom_pinned: PhantomPinned
 }
 
 unsafe impl<D> Send for Node<D> where D:Send{}
@@ -41,7 +41,7 @@ impl<D> Node<D> {
             list: core::ptr::null_mut(),
             data: Some(data),
             is_on_list: AtomicBool::new(false),
-            phantom_pinned: PhantomPinned,
+            _phantom_pinned: PhantomPinned,
         }
     }
 }

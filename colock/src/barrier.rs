@@ -5,7 +5,7 @@ use std::pin::{pin, Pin};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use intrusive_list::{ConcurrentIntrusiveList, IntrusiveList, Node};
-use parking::{Parker, ThreadParker, ThreadParkerT};
+use parking::Parker;
 use crate::lock_utils::MaybeAsyncWaker;
 
 #[derive(Debug)]
@@ -23,19 +23,6 @@ impl Barrier {
             wait_queue: ConcurrentIntrusiveList::new(),
             queue_lock: Mutex::new(0),
         }
-    }
-
-    fn get_parker()-> Parker {
-        if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
-            return Parker::Owned(ThreadParker::const_new())
-        }
-
-        thread_local! {
-            static HANDLE: ThreadParker = const {ThreadParker::const_new()}
-        }
-        HANDLE.with(|handle| {
-            unsafe {Parker::Ref(core::mem::transmute(handle))}
-        })
     }
     
     fn wait_inner(&self, list: &mut IntrusiveList<MaybeAsyncWaker>, pinned_node: Pin<&mut Node<MaybeAsyncWaker>>) {
@@ -59,7 +46,7 @@ impl Barrier {
         if self.target == 0 {
             return;
         }
-        let parker = Self::get_parker();
+        let parker = Parker::new();
         parker.prepare_park();
         let waker = MaybeAsyncWaker::Parker(parker.waker());
 

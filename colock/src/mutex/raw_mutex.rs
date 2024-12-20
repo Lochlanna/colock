@@ -1,11 +1,9 @@
 use core::sync::atomic::{AtomicU8, Ordering};
 use std::future::Future;
-use std::ops::{Add, Deref};
 use std::pin::{pin, Pin};
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
 use intrusive_list::{ConcurrentIntrusiveList, Error, Node};
-use parking::{Parker, ThreadParker, ThreadParkerT};
+use parking::Parker;
 use crate::lock_utils::MaybeAsyncWaker;
 
 const UNLOCKED: u8 = 0;
@@ -48,31 +46,16 @@ impl RawMutex {
         }
     }
 
-    fn get_parker()-> Parker {
-        if ThreadParker::IS_CHEAP_TO_CONSTRUCT {
-            return Parker::Owned(ThreadParker::const_new())
-        }
-
-        thread_local! {
-            static HANDLE: ThreadParker = const {ThreadParker::const_new()}
-        }
-        HANDLE.with(|handle| {
-            unsafe {Parker::Ref(core::mem::transmute(handle))}
-        })
-    }
-
-    #[inline]
     pub fn lock(&self) {
-        self.lock_inner::<Instant>(None);
+        self.lock_inner(None);
     }
 
-
-    fn lock_inner<T:crate::lock_utils::Timeout>(&self, timeout: Option<T>) -> bool {
+    fn lock_inner(&self, timeout: Option<&dyn crate::lock_utils::Timeout>) -> bool {
         loop {
             if self.try_lock() {
                 return true;
             }
-            let parker = Self::get_parker();
+            let parker = Parker::new();
             parker.prepare_park();
             let waker = MaybeAsyncWaker::Parker(parker.waker());
 
@@ -174,16 +157,16 @@ impl RawMutex {
     pub unsafe fn bump(&self) {
         if self.state.load(Ordering::Acquire) == (LOCKED_BIT | WAIT_BIT) {
             self.unlock();
-            self.lock()
+            self.lock();
         }
     }
 
     pub fn try_lock_for(&self, timeout: core::time::Duration) -> bool {
-        self.lock_inner(Some(timeout))
+        self.lock_inner(Some(&timeout))
     }
 
     pub fn try_lock_until(&self, timeout: std::time::Instant) -> bool {
-        self.lock_inner(Some(timeout))
+        self.lock_inner(Some(&timeout))
     }
 }
 
@@ -314,7 +297,8 @@ mod tests {
         let start = Instant::now();
         let did_lock = mutex.try_lock_for(Duration::from_millis(150));
         assert!(!did_lock);
-        assert!(start.elapsed().as_millis() >= 150);
+        let elapsed = start.elapsed().as_millis();
+        assert!(elapsed >= 150);
         unsafe {
             mutex.unlock();
         }

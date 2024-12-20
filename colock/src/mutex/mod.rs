@@ -3,7 +3,6 @@ mod raw_mutex;
 
 pub use raw_mutex::RawMutex;
 use std::fmt::Debug;
-use std::ops::DerefMut;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -232,7 +231,7 @@ mod tests {
                 for _ in 0..num_iterations {
                     let guard = mutex.lock();
                     barrier.wait();
-                    while unsafe { mutex.raw() }.queue().count() == 0 {
+                    while unsafe { mutex.raw_mutex() }.queue().count() == 0 {
                         thread::yield_now();
                     }
                     thread::sleep(Duration::from_millis(5));
@@ -262,7 +261,7 @@ mod tests {
                 for _ in 0..num_iterations {
                     let guard = mutex.lock_async().await;
                     barrier.wait().await;
-                    while unsafe { mutex.raw() }.queue().count() == 0 {
+                    while unsafe { mutex.raw_mutex() }.queue().count() == 0 {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
                     tokio::time::sleep(Duration::from_millis(5)).await;

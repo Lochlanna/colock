@@ -8,6 +8,5 @@
 pub mod barrier;
 pub mod condvar;
 pub mod mutex;
-pub mod rw_lock;
 mod spinwait;
 mod lock_utils;

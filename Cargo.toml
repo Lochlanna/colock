@@ -2,10 +2,10 @@
 resolver = "2"
 members = [
     "benchmarks",
-    "parking",
     "mini_lock",
     "colock",
-    "intrusive_list",
+    "intrusive_list", 
+    "parking",
 ]
 
 [profile.bench]
