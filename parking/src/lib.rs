@@ -1,4 +1,5 @@
 use std::ops::Sub;
+use std::ptr::null;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -24,12 +25,20 @@ impl Parker {
         }
     }
     
+    pub fn should_wakeup(&self) -> bool {
+        self.should_wakeup.load(Ordering::Acquire)
+    }
+    
     pub fn prepare_park(&self) {
         self.should_wakeup.store(false, Ordering::Relaxed);
     }
     
     pub fn waker(&self)->Waker{
         Waker::new(self)
+    }
+
+    pub fn async_waker(&self, waker: std::task::Waker) -> Waker {
+        Waker::new_task(self, waker)
     }
     
     pub fn park_until(&self, timeout: Instant) -> bool {
@@ -58,23 +67,52 @@ impl Parker {
 }
 
 #[derive(Debug)]
+enum MaybeAsync {
+    Thread(std::thread::Thread),
+    Task(std::task::Waker),
+}
+
+#[derive(Debug)]
 pub struct Waker {
     parker: *const Parker,
-    inner: std::thread::Thread
+    inner: MaybeAsync
 }
 
 impl Waker {
+
+    pub const fn new_task(parker: &Parker, waker: std::task::Waker) -> Waker {
+        Self {
+            parker,
+            inner: MaybeAsync::Task(waker)
+        }
+    }
+
+    pub const fn new_task_unattached(waker: std::task::Waker) -> Waker {
+        Self {
+            parker: null(),
+            inner: MaybeAsync::Task(waker)
+        }
+    }
     pub fn new(parker: &Parker)->Self{
         Self {
             parker,
-            inner: std::thread::current()
+            inner: MaybeAsync::Thread(std::thread::current())
         }
     }
-    
-    pub fn wake(&self) {
-        let parker =unsafe { self.parker.as_ref().unwrap() };
-        parker.should_wakeup.store(true, Ordering::Release);
-        self.inner.unpark();
+
+    pub fn wake(self) {
+        if !self.parker.is_null() {
+            let parker =unsafe { self.parker.as_ref().unwrap() };
+            parker.should_wakeup.store(true, Ordering::Release);
+        }
+        match self.inner {
+            MaybeAsync::Thread(handle) => {
+                handle.unpark();
+            }
+            MaybeAsync::Task(waker) => {
+                waker.wake();
+            }
+        }
     }
 }
 

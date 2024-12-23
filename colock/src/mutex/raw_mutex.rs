@@ -3,8 +3,7 @@ use std::future::Future;
 use std::pin::{pin, Pin};
 use std::task::{Context, Poll};
 use intrusive_list::{ConcurrentIntrusiveList, Error, Node};
-use parking::Parker;
-use crate::lock_utils::MaybeAsyncWaker;
+use parking::{Parker, Waker};
 
 const UNLOCKED: u8 = 0;
 const LOCKED_BIT: u8 = 0b1;
@@ -14,7 +13,7 @@ const FAIR_BIT: u8 = 0b100;
 
 #[derive(Debug)]
 pub struct RawMutex {
-    queue: ConcurrentIntrusiveList<MaybeAsyncWaker>,
+    queue: ConcurrentIntrusiveList<Waker>,
     state: AtomicU8,
 }
 
@@ -35,7 +34,7 @@ impl RawMutex {
 
     /// Returns a reference to the queue used by this mutex.
     /// This is for testing hence the pub(crate) visibility.
-    pub(crate) const fn queue(&self) -> &ConcurrentIntrusiveList<MaybeAsyncWaker> {
+    pub(crate) const fn queue(&self) -> &ConcurrentIntrusiveList<Waker> {
         &self.queue
     }
 
@@ -57,7 +56,7 @@ impl RawMutex {
             }
             let parker = Parker::new();
             parker.prepare_park();
-            let waker = MaybeAsyncWaker::Parker(parker.waker());
+            let waker = parker.waker();
 
             let mut node = ConcurrentIntrusiveList::make_node(waker);
             let pinned_node = pin!(node);
@@ -173,7 +172,7 @@ impl RawMutex {
 
 pub struct RawMutexPoller<'a> {
     raw_mutex: &'a RawMutex,
-    node:Option<Node<MaybeAsyncWaker>>
+    node:Option<Node<Waker>>
 }
 unsafe impl<'a> Send for RawMutexPoller<'a> {}
 impl<'a> Future for RawMutexPoller<'a> {
@@ -184,7 +183,7 @@ impl<'a> Future for RawMutexPoller<'a> {
             return Poll::Ready(())
         }
         let self_mut = unsafe {self.get_unchecked_mut()};
-        let waker = MaybeAsyncWaker::Waker(cx.waker().clone());
+        let waker = Waker::new_task_unattached(cx.waker().clone());
         let node = self_mut.node.insert(ConcurrentIntrusiveList::make_node(waker));
         let node = unsafe {Pin::new_unchecked(node)};
 

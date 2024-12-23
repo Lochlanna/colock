@@ -5,13 +5,12 @@ use std::pin::{pin, Pin};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use intrusive_list::{ConcurrentIntrusiveList, IntrusiveList, Node};
-use parking::Parker;
-use crate::lock_utils::MaybeAsyncWaker;
+use parking::{Parker, Waker};
 
 #[derive(Debug)]
 pub struct Barrier {
     target: usize,
-    wait_queue: ConcurrentIntrusiveList<MaybeAsyncWaker>,
+    wait_queue: ConcurrentIntrusiveList<Waker>,
 }
 
 impl Barrier {
@@ -23,7 +22,7 @@ impl Barrier {
         }
     }
 
-    fn lock_inner(&self, list: &mut IntrusiveList<MaybeAsyncWaker>, node: Pin<&mut Node<MaybeAsyncWaker>>) -> bool {
+    fn lock_inner(&self, list: &mut IntrusiveList<Waker>, node: Pin<&mut Node<Waker>>) -> bool {
         if list.count() == self.target - 1 {
             // we were the last ones wake everyone
             while let Some(waker) = list.pop_head() {
@@ -45,7 +44,7 @@ impl Barrier {
         }
         let parker = Parker::new();
         parker.prepare_park();
-        let waker = MaybeAsyncWaker::Parker(parker.waker());
+        let waker = parker.waker();
         let mut node = ConcurrentIntrusiveList::make_node(waker);
         let pinned_node = pin!(node);
 
@@ -61,14 +60,16 @@ impl Barrier {
    pub const fn wait_async(&self) -> BarrierPoller{
        BarrierPoller {
            barrier: self,
-           node: None
+           node: None,
+           parker: None,
        }
    }
 }
 
 pub struct BarrierPoller<'a> {
     barrier: &'a Barrier,
-    node: Option<Node<MaybeAsyncWaker>>
+    node: Option<Node<Waker>>,
+    parker: Option<Parker>,
 }
 
 unsafe impl<'a> Send for BarrierPoller<'a> {}
@@ -77,17 +78,19 @@ impl<'a> Future for BarrierPoller<'a> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let node_has_data = ||{
-            unsafe {
-                self.node.as_ref().map(|node| node.has_data_locked())
-            }
-        };
-        
-        if self.barrier.target == 0 || node_has_data() == Some(false) {
+        if self.barrier.target == 0 || self.parker.as_ref().map(Parker::should_wakeup) == Some(true) {
             return Poll::Ready(());
         }
         let self_mut = unsafe {self.get_unchecked_mut()};
-        let node = ConcurrentIntrusiveList::make_node(MaybeAsyncWaker::Waker(cx.waker().clone()));
+        
+        // This will cause any existing node to drop which will remove it from the list
+        // this has to be done before a new parker is made because the waker has a pointer
+        // to the parker. If we kill the parker, and then it gets woken before we add the new 
+        // waker to the list it will hit already deleted memory
+        self_mut.node = None;
+        
+        let parker = self_mut.parker.insert(Parker::new());
+        let node = ConcurrentIntrusiveList::make_node(parker.async_waker(cx.waker().clone()));
         let node = self_mut.node.insert(node);
         let node = unsafe {Pin::new_unchecked(node)};
         
@@ -168,6 +171,5 @@ mod tests {
         for handle in handles {
             handle.join().unwrap();
         }
-        // assert!(!barrier.queue_lock.is_locked());
     }
 }
