@@ -12,7 +12,6 @@ use crate::lock_utils::MaybeAsyncWaker;
 pub struct Barrier {
     target: usize,
     wait_queue: ConcurrentIntrusiveList<MaybeAsyncWaker>,
-    queue_lock: Mutex<usize>,
 }
 
 impl Barrier {
@@ -21,23 +20,21 @@ impl Barrier {
         Self {
             target: count,
             wait_queue: ConcurrentIntrusiveList::new(),
-            queue_lock: Mutex::new(0),
         }
     }
-    
-    fn wait_inner(&self, list: &mut IntrusiveList<MaybeAsyncWaker>, pinned_node: Pin<&mut Node<MaybeAsyncWaker>>) {
-        let num_waiting = list.count() + 1;
-        if num_waiting < self.target {
-            //TODO handle the error here...
-            unsafe {
-                list.push_head(pinned_node.get_unchecked_mut(), &self.wait_queue);
-            }
-            
-        } else {
+
+    fn lock_inner(&self, list: &mut IntrusiveList<MaybeAsyncWaker>, node: Pin<&mut Node<MaybeAsyncWaker>>) -> bool {
+        if list.count() == self.target - 1 {
+            // we were the last ones wake everyone
             while let Some(waker) = list.pop_head() {
                 waker.wake();
             }
+            return false;
         }
+        unsafe {
+            list.push_head(node.get_unchecked_mut(), &self.wait_queue).expect("barrier node was dirty");
+        }
+        true
     }
 
     /// Increments the internal count and blocks the thread until the count reaches the target if it
@@ -49,48 +46,24 @@ impl Barrier {
         let parker = Parker::new();
         parker.prepare_park();
         let waker = MaybeAsyncWaker::Parker(parker.waker());
-
         let mut node = ConcurrentIntrusiveList::make_node(waker);
         let pinned_node = pin!(node);
-        
-        self.wait_queue.with_lock(|list| {
-            self.wait_inner(list, pinned_node);
+
+        let should_sleep = self.wait_queue.with_lock(|list| {
+            self.lock_inner(list, pinned_node)
         });
+        // If should_sleep is true it means we got queued.
+        if should_sleep {
+            parker.park();
+        }
     }
 
-    /// Increments the internal count and waits until the count reaches the target if it
-    /// is not already at the target.
-    pub async fn wait_async(&self) {
-        todo!();
-        // if self.target == 0 {
-        //     return;
-        // }
-        // // we use an atomic here rather than a cell just to appease async send bounds. It doesn't
-        // // actually get run from multiple threads. This means relaxed ordering is always fine
-        // let wake_all = AtomicBool::new(false);
-        // let mut guard = Some(self.queue_lock.lock_async().await);
-        // let expected_generation = self.generation.load(Ordering::Relaxed);
-        // self.wait_queue
-        //     .wait_while_async(
-        //         |_| {
-        //             if let Some(num_waiting) = guard.as_mut() {
-        //                 **num_waiting += 1;
-        //                 if **num_waiting == self.target {
-        //                     wake_all.store(true, Ordering::Relaxed);
-        //                     return false;
-        //                 }
-        //             }
-        //             // we have to drop the guard here as returning true will put this thread to sleep
-        //             guard = None;
-        //             true
-        //         },
-        //         || self.generation.load(Ordering::Acquire) > expected_generation,
-        //     )
-        //     .await;
-        // if wake_all.load(Ordering::Relaxed) {
-        //     self.wake_all(&mut guard);
-        // }
-    }
+   pub const fn wait_async(&self) -> BarrierPoller{
+       BarrierPoller {
+           barrier: self,
+           node: None
+       }
+   }
 }
 
 pub struct BarrierPoller<'a> {
@@ -104,20 +77,27 @@ impl<'a> Future for BarrierPoller<'a> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.node.is_some() {
-            return Poll::Ready(())
-        }
+        let node_has_data = ||{
+            unsafe {
+                self.node.as_ref().map(|node| node.has_data_locked())
+            }
+        };
         
+        if self.barrier.target == 0 || node_has_data() == Some(false) {
+            return Poll::Ready(());
+        }
         let self_mut = unsafe {self.get_unchecked_mut()};
-        let waker = MaybeAsyncWaker::Waker(cx.waker().clone());
-        let node = self_mut.node.insert(ConcurrentIntrusiveList::make_node(waker));
+        let node = ConcurrentIntrusiveList::make_node(MaybeAsyncWaker::Waker(cx.waker().clone()));
+        let node = self_mut.node.insert(node);
         let node = unsafe {Pin::new_unchecked(node)};
         
-        self_mut.barrier.wait_queue.with_lock(|list| {
-           self_mut.barrier.wait_inner(list, node); 
+        let should_sleep = self_mut.barrier.wait_queue.with_lock(|list| {
+            self_mut.barrier.lock_inner(list, node)
         });
-        
-        Poll::Pending
+        if should_sleep {
+            return Poll::Pending;
+        }
+        Poll::Ready(())
     }
 }
 
@@ -188,6 +168,6 @@ mod tests {
         for handle in handles {
             handle.join().unwrap();
         }
-        assert!(!barrier.queue_lock.is_locked());
+        // assert!(!barrier.queue_lock.is_locked());
     }
 }

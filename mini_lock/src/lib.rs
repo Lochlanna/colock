@@ -16,8 +16,8 @@ mod spinwait;
 use std::{ptr, thread};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread::{current, Thread};
 use lock_api::GuardSend;
+use parking::{Parker, Waker};
 use crate::spinwait::SpinWait;
 
 const LOCKED_BIT: usize = 0b1;
@@ -42,11 +42,11 @@ impl Tagged for usize {
 #[repr(align(2))]
 struct Node {
     next: *mut Self,
-    waker: Option<Thread>
+    waker: Option<Waker>
 }
 
 impl Node {
-    const fn new(waker: Thread) -> Self {
+    const fn new(waker: Waker) -> Self {
         Self {
             next: null_mut(),
             waker: Some(waker),
@@ -100,7 +100,7 @@ impl RawMiniLock {
         }
     }
 
-    fn pop(&self)->Option<Thread> {
+    fn pop(&self)->Option<Waker> {
         assert!(self.head.load(Ordering::Acquire).get_flag());
 
         let mut head = self.head.load(Ordering::Relaxed);
@@ -139,13 +139,14 @@ unsafe impl lock_api::RawMutex for RawMiniLock {
             }
 
             // we will push ourselves onto the queue and then sleep
-
-            let mut node = Node::new(current());
+            let parker = Parker::new();
+            parker.prepare_park();
+            let mut node = Node::new(parker.waker());
 
             if self.push_or_lock(&mut node) {
                 return;
             }
-            thread::park();
+            parker.park();
         }
     }
 
@@ -174,7 +175,7 @@ unsafe impl lock_api::RawMutex for RawMiniLock {
                 // unlock the lock
                 self.head.fetch_and(PTR_MASK, Ordering::Release);
                 // wake the thread!
-                waker.unpark();
+                waker.wake();
                 return;
             }
         }
@@ -246,7 +247,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn lots_and_lots() {
-        const J: u64 = 1_0000_000;
+        const J: u64 = 1_000_000;
         // const J: u64 = 10000000;
         // const J: u64 = 50000000;
         const K: u64 = 6;

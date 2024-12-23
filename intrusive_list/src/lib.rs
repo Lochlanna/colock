@@ -44,6 +44,17 @@ impl<D> Node<D> {
             _phantom_pinned: PhantomPinned,
         }
     }
+    
+    pub unsafe fn has_data_unlocked(&self) -> bool {
+        self.data.is_some()
+    }
+    
+    pub unsafe fn has_data_locked(&self) -> bool {
+        let list = self.list.as_ref().unwrap();
+        list.with_lock(|_|{
+            self.data.is_some()
+        })
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]

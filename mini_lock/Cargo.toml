@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 lock_api = "0.4.12"
+parking = {path = "../parking"}

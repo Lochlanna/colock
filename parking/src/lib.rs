@@ -25,7 +25,7 @@ impl Parker {
     }
     
     pub fn prepare_park(&self) {
-        
+        self.should_wakeup.store(false, Ordering::Relaxed);
     }
     
     pub fn waker(&self)->Waker{
@@ -35,7 +35,7 @@ impl Parker {
     pub fn park_until(&self, timeout: Instant) -> bool {
         let mut should_wakeup = false;
         while !should_wakeup {
-            let diff = Instant::now().sub(timeout);
+            let diff = timeout.sub(Instant::now());
             if diff.is_zero() {
                 break;
             }
