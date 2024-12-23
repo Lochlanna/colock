@@ -14,6 +14,7 @@
 
 mod spinwait;
 use std::{ptr, thread};
+use std::cell::Cell;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use lock_api::GuardSend;
@@ -24,13 +25,13 @@ const LOCKED_BIT: usize = 0b1;
 const PTR_MASK: usize = !LOCKED_BIT;
 
 trait Tagged {
-    fn get_ptr(&self)->*mut Node;
+    fn get_ptr(&self)->*const Node;
     fn get_flag(&self)->bool;
 }
 
 impl Tagged for usize {
-    fn get_ptr(&self) -> *mut Node {
-        (*self & PTR_MASK) as *mut Node
+    fn get_ptr(&self) -> *const Node {
+        (*self & PTR_MASK) as *const Node
     }
 
     fn get_flag(&self) -> bool {
@@ -41,15 +42,15 @@ impl Tagged for usize {
 
 #[repr(align(2))]
 struct Node {
-    next: *mut Self,
-    waker: Option<Waker>
+    next: *const Self,
+    waker: Cell<Option<Waker>>
 }
 
 impl Node {
     const fn new(waker: Waker) -> Self {
         Self {
             next: null_mut(),
-            waker: Some(waker),
+            waker: Cell::new(Some(waker)),
         }
     }
 
@@ -85,8 +86,8 @@ impl RawMiniLock {
         loop {
             if head.get_flag() {
                 // it's locked, so we will just try and push the node onto the list
-                node.next = (head & PTR_MASK) as *mut Node;
-                match self.head.compare_exchange(head, node.as_usize_ptr() | LOCKED_BIT, Ordering::Relaxed, Ordering::Relaxed) {
+                node.next = (head & PTR_MASK) as *const Node;
+                match self.head.compare_exchange(head, node.as_usize_ptr() | LOCKED_BIT, Ordering::AcqRel, Ordering::Relaxed) {
                     Err(new_head) => head = new_head,
                     Ok(_) => return false, // we didn't lock the lock, but we did push the node
                 }
@@ -103,12 +104,12 @@ impl RawMiniLock {
     fn pop(&self)->Option<Waker> {
         assert!(self.head.load(Ordering::Acquire).get_flag());
 
-        let mut head = self.head.load(Ordering::Relaxed);
+        let mut head = self.head.load(Ordering::Acquire);
 
         while head != LOCKED_BIT {
-            let head_ref = unsafe {&mut *head.get_ptr()};
+            let head_ref = unsafe {head.get_ptr().as_ref().unwrap()};
             let next = head_ref.next;
-            if let Err(new_head) = self.head.compare_exchange(head, next as usize | LOCKED_BIT, Ordering::Relaxed, Ordering::Relaxed) {
+            if let Err(new_head) = self.head.compare_exchange(head, next as usize | LOCKED_BIT, Ordering::AcqRel, Ordering::Relaxed) {
                 head = new_head;
             } else {
                 // success!

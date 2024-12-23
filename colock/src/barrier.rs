@@ -5,6 +5,14 @@ use std::task::{Context, Poll};
 use intrusive_list::{ConcurrentIntrusiveList, IntrusiveList, Node};
 use parking::{Parker, Waker};
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct BarrierWaitResult(bool);
+impl BarrierWaitResult {
+    #[must_use] pub const fn is_leader(&self)->bool{
+        self.0
+    }
+}
+
 #[derive(Debug)]
 pub struct Barrier {
     target: usize,
@@ -36,9 +44,9 @@ impl Barrier {
 
     /// Increments the internal count and blocks the thread until the count reaches the target if it
     /// is not already at the target.
-    pub fn wait(&self) {
+    pub fn wait(&self) -> BarrierWaitResult {
         if self.target == 0 {
-            return;
+            return BarrierWaitResult(true);
         }
         let parker = Parker::new();
         parker.prepare_park();
@@ -52,7 +60,9 @@ impl Barrier {
         // If should_sleep is true it means we got queued.
         if should_sleep {
             parker.park();
+            return BarrierWaitResult(false);
         }
+        BarrierWaitResult(true)
     }
 
    pub const fn wait_async(&self) -> BarrierPoller{
@@ -74,11 +84,14 @@ pub struct BarrierPoller<'a> {
 unsafe impl<'a> Send for BarrierPoller<'a> {}
 
 impl<'a> Future for BarrierPoller<'a> {
-    type Output = ();
+    type Output = BarrierWaitResult;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.barrier.target == 0 || self.parker.as_ref().map(Parker::should_wakeup) == Some(true) {
-            return Poll::Ready(());
+        if self.barrier.target == 0 {
+            return Poll::Ready(BarrierWaitResult(true)); 
+        }
+        if self.parker.as_ref().map(Parker::should_wakeup) == Some(true) {
+            return Poll::Ready(BarrierWaitResult(false));
         }
         let self_mut = unsafe {self.get_unchecked_mut()};
 
@@ -99,7 +112,7 @@ impl<'a> Future for BarrierPoller<'a> {
         if should_sleep {
             return Poll::Pending;
         }
-        Poll::Ready(())
+        Poll::Ready(BarrierWaitResult(true))
     }
 }
 
@@ -118,13 +131,13 @@ mod tests {
         let handle = std::thread::spawn(move || {
             barrier.wait();
             let start = Instant::now();
-            barrier.wait();
+            assert!(!barrier.wait().is_leader());
             assert!(start.elapsed() > Duration::from_millis(100));
         });
         barrier_clone.wait();
         thread::sleep(Duration::from_millis(110));
         assert_eq!(barrier_clone.wait_queue.count(), 1);
-        barrier_clone.wait();
+        assert!(barrier_clone.wait().is_leader());
         assert_eq!(barrier_clone.wait_queue.count(), 0);
         handle.join().unwrap();
     }
