@@ -32,7 +32,7 @@ where
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.mutex().data()
+        unsafe { self.mutex().data() }
     }
 }
 
@@ -43,10 +43,7 @@ where
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
-            ptr::from_ref(self.mutex().data())
-                .cast_mut()
-                .as_mut()
-                .unwrap()
+            self.mutex().mut_data()
         }
     }
 }
@@ -69,7 +66,9 @@ where
     M: IsMutex<T>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", &self.mutex().data())
+        unsafe {
+            write!(f, "{}", self.mutex().data())
+        }
     }
 }
 

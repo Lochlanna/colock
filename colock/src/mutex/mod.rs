@@ -1,6 +1,7 @@
 mod guard;
 mod raw_mutex;
 
+use std::cell::UnsafeCell;
 pub use raw_mutex::RawMutex;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -12,7 +13,7 @@ pub use guard::*;
 #[derive(Debug)]
 pub struct Mutex<T: ?Sized> {
     raw_mutex: RawMutex,
-    data: T,
+    data: UnsafeCell<T>,
 }
 
 impl<T> Default for Mutex<T>
@@ -36,17 +37,17 @@ unsafe impl<T> Sync for Mutex<T> where T: Send + ?Sized {}
 impl<T> Mutex<T> {
     pub const fn new(data: T) -> Self {
         Self {
-            data,
+            data: UnsafeCell::new(data),
             raw_mutex: RawMutex::new(),
         }
     }
 
     pub const fn from_raw(raw_mutex: RawMutex, data: T) -> Self {
-        Self { data, raw_mutex }
+        Self { data: UnsafeCell::new(data), raw_mutex }
     }
 
     pub fn into_inner(self) -> T {
-        self.data
+        self.data.into_inner()
     }
 }
 
@@ -55,7 +56,7 @@ where
     T: ?Sized,
 {
     pub const fn data_ptr(&self) -> *mut T {
-        core::ptr::from_ref(&self.data).cast_mut()
+        self.data.get()
     }
 
     pub unsafe fn force_unlock(&self) {
@@ -67,7 +68,7 @@ where
     }
 
     pub fn get_mut(&mut self) -> &mut T {
-        &mut self.data
+        self.data.get_mut()
     }
 
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
@@ -136,8 +137,11 @@ where
     pub fn is_locked(&self) -> bool {
         self.raw().is_locked()
     }
-    const fn data(&self) -> &T {
-        &self.data
+    unsafe fn data(&self) -> &T {
+        self.data.get().as_ref().unwrap()
+    }
+    unsafe fn mut_data(&self) -> &mut T {
+        self.data.get().as_mut().unwrap()
     }
 }
 

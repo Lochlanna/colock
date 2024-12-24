@@ -172,23 +172,20 @@ mod tests {
         assert_eq!(barrier.wait_queue.count(), 0);
     }
 
-    #[test]
-    fn stress_test_barrier() {
-        const THREAD_COUNT: usize = 100; // Number of threads
-        const WAIT_COUNT: usize = 100;  // Number of times each thread calls `wait`
 
-        let barrier = Arc::new(Barrier::new(THREAD_COUNT));
+    fn stress_test_barrier_inner(thread_count: usize, wait_count: usize) {
+        let barrier = Arc::new(Barrier::new(thread_count));
         let mut handles = Vec::new();
 
         // Shared counter to track the number of waits completed across all threads
         let shared_counter = Arc::new(AtomicUsize::new(0));
 
-        for _ in 0..THREAD_COUNT {
+        for _ in 0..thread_count {
             let barrier_clone = Arc::clone(&barrier);
             let counter_clone = Arc::clone(&shared_counter);
 
             let handle = thread::spawn(move || {
-                for _ in 0..WAIT_COUNT {
+                for _ in 0..wait_count {
                     // Simulate some work before reaching the barrier
                     thread::sleep(Duration::from_millis(1));
 
@@ -211,7 +208,18 @@ mod tests {
         // Verify the total number of wait operations is correct
         assert_eq!(
             shared_counter.load(Ordering::Relaxed),
-            THREAD_COUNT * WAIT_COUNT
+            thread_count * wait_count
         );
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn stress_test_barrier() {
+        stress_test_barrier_inner(100,100);
+    }
+
+    #[test]
+    fn stress_test_barrier_miri() {
+        stress_test_barrier_inner(3,30);
     }
 }
