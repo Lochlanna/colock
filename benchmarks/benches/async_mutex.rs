@@ -17,7 +17,6 @@ const MAX_OUTSIDE: usize = 2;
 const OUTSIDE_STEP: usize = 2;
 
 fn criterion_benchmark(c: &mut Criterion) {
-    return;
     let tokio_runtime = tokio::runtime::Runtime::new().expect("couldn't spawn tokio runtime");
 
     let mut group = c.benchmark_group("async/throughput");

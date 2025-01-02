@@ -19,7 +19,6 @@ const MAX_OUTSIDE: usize = 2;
 const OUTSIDE_STEP: usize = 2;
 
 fn criterion_benchmark(c: &mut Criterion) {
-    return;
     let mut group = c.benchmark_group("mutex worst cast latency");
 
     let runs = (MIN_THREADS..=MAX_THREADS)
