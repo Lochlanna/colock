@@ -12,14 +12,13 @@
 #![allow(clippy::module_name_repetitions)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 
-mod spinwait;
-use std::{ptr, thread};
+use std::ptr;
 use std::cell::Cell;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use lock_api::GuardSend;
 use parking::{Parker, Waker};
-use crate::spinwait::SpinWait;
+use shared_util::SpinWait;
 
 const LOCKED_BIT: usize = 0b1;
 const PTR_MASK: usize = !LOCKED_BIT;

@@ -6,6 +6,7 @@ members = [
     "colock",
     "intrusive_list", 
     "parking",
+    "shared_util",
 ]
 
 [profile.bench]

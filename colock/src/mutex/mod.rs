@@ -158,19 +158,26 @@ where
     ///
     /// # Examples
     /// ```rust
-    ///# use colock::mutex::Mutex;
-    ///# tokio_test::block_on(async {
+    /// # #[cfg(miri)] fn main() {}
+    /// # #[cfg(not(miri))]
+    /// # fn main() {
+    /// # use colock::mutex::Mutex;
+    /// # tokio_test::block_on(async {
     /// let mutex = Mutex::new(42);
     /// let guard = mutex.lock_async().await;
     /// assert_eq!(*guard, 42);
-    ///# });
+    /// # });
+    /// # }
     /// ```
     ///
     /// ## Timeout
     /// ```rust
-    ///# use tokio::select;
+    /// # #[cfg(miri)] fn main() {}
+    /// # #[cfg(not(miri))]
+    /// # fn main() {
+    /// # use tokio::select;
     /// use colock::mutex::Mutex;
-    ///# tokio_test::block_on(async {
+    /// # tokio_test::block_on(async {
     /// let mutex = Mutex::new(());
     /// let _guard = mutex.lock();
     /// //mutex is already locked so this call should timeout
@@ -179,6 +186,7 @@ where
     ///  _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => { assert!(mutex.is_locked())}
     /// }
     ///# });
+    /// # }
     /// ```
 
     pub async fn lock_async(&self) -> MutexGuard<'_, T> {

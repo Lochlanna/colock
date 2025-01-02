@@ -17,6 +17,7 @@ const MAX_OUTSIDE: usize = 2;
 const OUTSIDE_STEP: usize = 2;
 
 fn criterion_benchmark(c: &mut Criterion) {
+    return;
     let tokio_runtime = tokio::runtime::Runtime::new().expect("couldn't spawn tokio runtime");
 
     let mut group = c.benchmark_group("async/throughput");
@@ -25,7 +26,7 @@ fn criterion_benchmark(c: &mut Criterion) {
         .cartesian_product((MIN_OUTSIDE..=MAX_OUTSIDE).step_by(OUTSIDE_STEP))
         .map(|((a, b), c)| Run::from((a, b, c)));
     for run in runs {
-        group.bench_with_input(BenchmarkId::new("colock4", run), &run, |b, run| {
+        group.bench_with_input(BenchmarkId::new("colock", run), &run, |b, run| {
             b.to_async(&tokio_runtime).iter_custom(|iters| {
                 async_shared::run_throughput_benchmark::<colock::mutex::Mutex<f64>>(*run, iters)
             })

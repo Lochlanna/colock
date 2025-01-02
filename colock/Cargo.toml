@@ -10,10 +10,6 @@ intrusive_list = { path = "../intrusive_list" }
 parking = {path = "../parking"}
 
 [dev-dependencies]
-itertools = "0.13.0"
 tokio = { version = "1", features = ["full"] }
 tokio-scoped = "0.2.0"
-futures-polling = "0.1.1"
-rand = "0.8.5"
-rand_chacha = "0.3.1"
 tokio-test = "0.4.3"
